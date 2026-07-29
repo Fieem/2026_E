@@ -1,0 +1,5 @@
+# 树莓派上优先使用 README 中的 apt 命令安装这些依赖。
+numpy
+opencv-python
+Pillow
+# Picamera2 由 Raspberry Pi OS 的 python3-picamera2 软件包提供。

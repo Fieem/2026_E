@@ -1,0 +1,27 @@
+{
+  "camera": {
+    "width": 1600,
+    "height": 1200
+  },
+  "workspace": {
+    "width_mm": 297.0,
+    "height_mm": 210.0,
+    "pixels_per_mm": 4.0,
+    "image_points": [
+      [0, 0],
+      [1599, 0],
+      [1599, 1199],
+      [0, 1199]
+    ],
+    "target_center_mm": [148.5, 105.0]
+  },
+  "segmentation": {
+    "mode": "light_on_dark",
+    "threshold": 0,
+    "blur_size": 5,
+    "morphology_mm": 0.8,
+    "polygon_epsilon_mm": 1.2,
+    "min_piece_area_mm2": 150.0,
+    "max_piece_area_mm2": 12000.0
+  }
+}

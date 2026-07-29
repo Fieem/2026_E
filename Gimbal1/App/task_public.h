@@ -6,8 +6,8 @@ extern "C" {
 #endif
 
 #include "cmsis_os2.h"
+#include "scara_protocol.h"
 
-void IMU_task(void * argument);
 void StartReceiveTask(void *argument);
 void StartGimbalTask(void *argument);
 
@@ -15,18 +15,6 @@ extern osThreadId_t GimbalTaskHandle;
 
 #ifdef __cplusplus
 }
-#endif
-
-#ifdef __cplusplus
-
-#include "Gimbal.h"
-#include "QGIMBAL_PID.h"
-
-extern Gimbal gimbal;
-extern QGIMBAL_PID vision_x_pid;
-extern QGIMBAL_PID vision_y_pid;
-extern uint8_t gimbal_mode;
-
 #endif
 
 #endif //TASK_PUBLIC_H

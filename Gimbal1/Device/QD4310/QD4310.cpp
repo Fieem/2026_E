@@ -1,52 +1,108 @@
 #include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <numbers>
 #include "QD4310.h"
 
-void QD4310::SendCommand(const Command cmd, const int16_t value) {
-    uint8_t TxBuffer[3];
+namespace {
+constexpr float kTwoPi = 2.0f * std::numbers::pi_v<float>;
 
-    TxBuffer[0] = static_cast<uint8_t>(cmd);
-
-    TxBuffer[1] = static_cast<uint8_t>(value & 0xFF);
-    TxBuffer[2] = static_cast<uint8_t>((value >> 8) & 0xFF);
-
-    FDCAN_TxHeaderTypeDef TxHeader;
-    TxHeader.Identifier = 0x400 + id;
-    TxHeader.IdType = FDCAN_STANDARD_ID;
-    TxHeader.TxFrameType = FDCAN_DATA_FRAME;
-    TxHeader.DataLength = FDCAN_DLC_BYTES_3;
-    TxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-    TxHeader.BitRateSwitch = FDCAN_BRS_OFF;
-    TxHeader.FDFormat = FDCAN_CLASSIC_CAN;
-    TxHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
-    TxHeader.MessageMarker = 0;
-
-    HAL_FDCAN_AddMessageToTxFifoQ(hfdcan, &TxHeader, TxBuffer);
-    // while (HAL_FDCAN_GetTxFifoFreeLevel(hfdcan) != 3);
+uint16_t readU16Le(const uint8_t *data) {
+    return static_cast<uint16_t>(data[0]) |
+           static_cast<uint16_t>(static_cast<uint16_t>(data[1]) << 8U);
 }
 
-void QD4310::update(const uint8_t feedback[8]) {
-    enabled = feedback[0] & 0x01;
-    current = *(int16_t *)(feedback + 2) * 10.0f / INT16_MAX;
-    speed = *(int16_t *)(feedback + 4) * 1000.0f / INT16_MAX;
-    angle = *(uint16_t *)(feedback + 6) * 2 * std::numbers::pi_v<float> / UINT16_MAX;
+int16_t readI16Le(const uint8_t *data) {
+    return static_cast<int16_t>(readU16Le(data));
+}
 }
 
-void QD4310::setAngle(const float _angle) {
-    std::clamp(_angle, 0.0f, 2 * std::numbers::pi_v<float>); // 限制角度在[0, 2pi]范围内
-    SendCommand(Command::ANGLE, _angle / 2 / std::numbers::pi_v<float> * UINT16_MAX);
+bool QD4310::sendCommand(const Command cmd, const uint16_t raw_value) {
+    if (hfdcan_ == nullptr) {
+        last_tx_status_ = HAL_ERROR;
+        return false;
+    }
+
+    uint8_t tx_buffer[3]{};
+
+    tx_buffer[0] = static_cast<uint8_t>(cmd);
+    tx_buffer[1] = static_cast<uint8_t>(raw_value & 0xFFU);
+    tx_buffer[2] = static_cast<uint8_t>((raw_value >> 8U) & 0xFFU);
+
+    FDCAN_TxHeaderTypeDef tx_header{};
+    tx_header.Identifier = commandCanId();
+    tx_header.IdType = FDCAN_STANDARD_ID;
+    tx_header.TxFrameType = FDCAN_DATA_FRAME;
+    tx_header.DataLength = FDCAN_DLC_BYTES_3;
+    tx_header.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+    tx_header.BitRateSwitch = FDCAN_BRS_OFF;
+    tx_header.FDFormat = FDCAN_CLASSIC_CAN;
+    tx_header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+    tx_header.MessageMarker = 0;
+
+    last_tx_status_ = HAL_FDCAN_AddMessageToTxFifoQ(hfdcan_, &tx_header, tx_buffer);
+    return last_tx_status_ == HAL_OK;
 }
 
-void QD4310::setSpeed(const float _speed) {
-    std::clamp(_speed, -1000.0f, 1000.0f); // 限制速度在[-1000, 1000]范围内
-    SendCommand(Command::SPEED, _speed / 1000 * INT16_MAX);
+bool QD4310::enable() {
+    return sendCommand(Command::ENABLE, 0U);
 }
 
-void QD4310::setLowSpeed(const float _speed) {
-    std::clamp(_speed, -1000.0f, 1000.0f); // 限制速度在[-1000, 1000]范围内
-    SendCommand(Command::LOW_SPEED, _speed / 1000 * INT16_MAX);
+bool QD4310::disable() {
+    return sendCommand(Command::DISABLE, 0U);
 }
 
-void QD4310::setCurrent(const float _current) {
-    std::clamp(_current, -10.0f, 10.0f);
-    SendCommand(Command::CURRENT, _current / 10 * INT16_MAX);
+bool QD4310::update(const uint8_t feedback[8]) {
+    if (feedback == nullptr) return false;
+
+    enabled = (feedback[0] & 0x01U) != 0U;
+    current = static_cast<float>(readI16Le(feedback + 2)) * 10.0f /
+              static_cast<float>(std::numeric_limits<int16_t>::max());
+    speed = static_cast<float>(readI16Le(feedback + 4)) * 1000.0f /
+            static_cast<float>(std::numeric_limits<int16_t>::max());
+    angle = static_cast<float>(readU16Le(feedback + 6)) * kTwoPi /
+            static_cast<float>(std::numeric_limits<uint16_t>::max());
+    last_feedback_tick_ = HAL_GetTick();
+    return true;
+}
+
+bool QD4310::setAngle(float angle_rad) {
+    if (!std::isfinite(angle_rad)) return false;
+
+    angle_rad = std::clamp(angle_rad, 0.0f, kTwoPi);
+    const auto raw = static_cast<uint16_t>(std::lround(
+        angle_rad / kTwoPi * static_cast<float>(std::numeric_limits<uint16_t>::max())));
+    return sendCommand(Command::ANGLE, raw);
+}
+
+bool QD4310::setSpeed(float speed_rpm) {
+    if (!std::isfinite(speed_rpm)) return false;
+
+    speed_rpm = std::clamp(speed_rpm, -1000.0f, 1000.0f);
+    const auto raw = static_cast<int16_t>(std::lround(
+        speed_rpm / 1000.0f * static_cast<float>(std::numeric_limits<int16_t>::max())));
+    return sendCommand(Command::SPEED, static_cast<uint16_t>(raw));
+}
+
+bool QD4310::setLowSpeed(float speed_rpm) {
+    if (!std::isfinite(speed_rpm)) return false;
+
+    speed_rpm = std::clamp(speed_rpm, -1000.0f, 1000.0f);
+    const auto raw = static_cast<int16_t>(std::lround(
+        speed_rpm / 1000.0f * static_cast<float>(std::numeric_limits<int16_t>::max())));
+    return sendCommand(Command::LOW_SPEED, static_cast<uint16_t>(raw));
+}
+
+bool QD4310::setCurrent(float current_a) {
+    if (!std::isfinite(current_a)) return false;
+
+    current_a = std::clamp(current_a, -10.0f, 10.0f);
+    const auto raw = static_cast<int16_t>(std::lround(
+        current_a / 10.0f * static_cast<float>(std::numeric_limits<int16_t>::max())));
+    return sendCommand(Command::CURRENT, static_cast<uint16_t>(raw));
+}
+
+bool QD4310::feedbackFresh(const uint32_t now_ms, const uint32_t timeout_ms) const {
+    return last_feedback_tick_ != 0U && (now_ms - last_feedback_tick_) <= timeout_ms;
 }

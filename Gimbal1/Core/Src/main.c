@@ -29,8 +29,6 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "BMI088driver.h"
-#include "bsp_dwt.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -127,8 +125,6 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-	DWT_Init(550); //no use
-	MX_USB_DEVICE_Init();
   while (1)
   {
     /* USER CODE END WHILE */

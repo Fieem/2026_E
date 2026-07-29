@@ -27,7 +27,6 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "task_public.h"
-#include "algorithm.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -62,18 +61,6 @@ const osThreadAttr_t defaultTask_attributes = {
   .stack_size = sizeof(defaultTaskBuffer),
   .priority = (osPriority_t) osPriorityNormal,
 };
-/* Definitions for INSTask_rtos */
-osThreadId_t INSTask_rtosHandle;
-uint32_t INSTasklBuffer[ 128 ];
-osStaticThreadDef_t INSTaskBlock;
-const osThreadAttr_t INSTask_rtos_attributes = {
-  .name = "INSTask_rtos",
-  .cb_mem = &INSTaskBlock,
-  .cb_size = sizeof(INSTaskBlock),
-  .stack_mem = &INSTasklBuffer[0],
-  .stack_size = sizeof(INSTasklBuffer),
-  .priority = (osPriority_t) osPriorityRealtime,
-};
 /* Definitions for ReceiveTask */
 osThreadId_t ReceiveTaskHandle;
 uint32_t myTask03Buffer[ 256 ];
@@ -98,19 +85,12 @@ const osThreadAttr_t GimbalTask_attributes = {
   .stack_size = sizeof(myTask04Buffer),
   .priority = (osPriority_t) osPriorityNormal,
 };
-/* Definitions for imuBinarySem01 */
-osSemaphoreId_t imuBinarySem01Handle;
-const osSemaphoreAttr_t imuBinarySem01_attributes = {
-  .name = "imuBinarySem01"
-};
-
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
 
 /* USER CODE END FunctionPrototypes */
 
 void StartDefaultTask(void *argument);
-void IMU_task(void *argument);
 extern void StartReceiveTask(void *argument);
 extern void StartGimbalTask(void *argument);
 
@@ -131,10 +111,6 @@ void MX_FREERTOS_Init(void) {
   /* add mutexes, ... */
   /* USER CODE END RTOS_MUTEX */
 
-  /* Create the semaphores(s) */
-  /* creation of imuBinarySem01 */
-  imuBinarySem01Handle = osSemaphoreNew(1, 0, &imuBinarySem01_attributes);
-
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   /* add semaphores, ... */
   /* USER CODE END RTOS_SEMAPHORES */
@@ -150,9 +126,6 @@ void MX_FREERTOS_Init(void) {
   /* Create the thread(s) */
   /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
-
-  /* creation of INSTask_rtos */
-  INSTask_rtosHandle = osThreadNew(IMU_task, NULL, &INSTask_rtos_attributes);
 
   /* creation of ReceiveTask */
   ReceiveTaskHandle = osThreadNew(StartReceiveTask, NULL, &ReceiveTask_attributes);
@@ -185,28 +158,9 @@ void StartDefaultTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-	  vofa_start();
     osDelay(1);
   }
   /* USER CODE END StartDefaultTask */
-}
-
-/* USER CODE BEGIN Header_IMU_task */
-/**
-* @brief Function implementing the INSTask_rtos thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_IMU_task */
-__weak void IMU_task(void *argument)
-{
-  /* USER CODE BEGIN IMU_task */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END IMU_task */
 }
 
 /* Private application code --------------------------------------------------*/

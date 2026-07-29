@@ -1,0 +1,9 @@
+/build/
+/cmake-build-*/
+/.idea/workspace.xml
+
+*.elf
+*.hex
+*.bin
+*.map
+*.su

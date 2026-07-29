@@ -1,103 +1,231 @@
+#include <algorithm>
+#include <cmath>
+
 #include "FreeRTOS.h"
-#include "task.h"
-#include "task_public.h"
-#include "main.h"
 #include "cmsis_os.h"
+#include "fdcan.h"
+#include "queue.h"
+#include "task.h"
+
 #include "QD4310.h"
-#include "QGIMBAL_PID.h"
-#include "Gimbal.h"
-#include "simple_kalman.h"
-#include "usart.h"
+#include "scara_j1_config.h"
+#include "scara_protocol.h"
 
-constexpr static float yaw_center = 0.0f;   // 云台偏航中心位置,单位: rad
-constexpr static float pitch_center = 0.0f; // 云台俯仰中心位置,单位: rad
+namespace {
 
-extern float INS_angle[3];       // yaw,pitch,roll
+using namespace scara::j1_config;
 
-QD4310 YawMotor(&hfdcan1, 0x00);   // 云台偏航电机
-QD4310 PitchMotor(&hfdcan1, 0x01); // 云台俯仰电机
+QD4310 j1_motor(&hfdcan1, kMotorNodeId);
+QueueHandle_t j1_command_queue = nullptr;
 
-Gimbal gimbal(
-    YawMotor, PitchMotor,
-    yaw_center, pitch_center,
-    QGIMBAL_PID{
-        QGIMBAL_PID::PID_type::position_type,
-        5.0f, 0.1f, 170.0f,
-        1.8f, -1.8f,
-        1.65, -1.65
-    },
-    QGIMBAL_PID{
-        QGIMBAL_PID::PID_type::position_type,
-        4.6f, 0.17f, 30.0f,
-        1.8f, -1.8f,
-        1.65, -1.65
-    },
-    0.001f);
+ScaraJ1State j1_state = SCARA_J1_STATE_DISABLED;
+float target_joint_angle_rad = 0.0f;
+uint32_t last_host_command_tick = 0U;
+uint32_t active_since_tick = 0U;
 
-QGIMBAL_PID vision_x_pid{
-    QGIMBAL_PID::PID_type::position_type,
-    0.004f, 0.00005f, 0.000f,
-    20, -20,
-    2000, -2000
-};
-QGIMBAL_PID vision_y_pid{
-    QGIMBAL_PID::PID_type::position_type,
-    0.0025f, 0.000f, 0.000f,
-    20, -20,
-    1000, -1000
-};
+float wrapToTwoPi(float angle_rad) {
+    angle_rad = std::fmod(angle_rad, kTwoPi);
+    return angle_rad < 0.0f ? angle_rad + kTwoPi : angle_rad;
+}
 
-extern SimpleKalman2D_t yaw_kf;
-extern SimpleKalman2D_t pitch_kf;
+float wrapToPi(float angle_rad) {
+    angle_rad = wrapToTwoPi(angle_rad + std::numbers::pi_v<float>);
+    return angle_rad - std::numbers::pi_v<float>;
+}
 
-void CAN_InterfaceInit();
+float jointToMotorAngle(float joint_angle_rad) {
+    const float direction = kDirectionInverted ? -1.0f : 1.0f;
+    return wrapToTwoPi(kZeroOffsetRad + direction * joint_angle_rad);
+}
 
-void StartGimbalTask(void *argument) {
-    CAN_InterfaceInit();
-    YawMotor.enable();
-    PitchMotor.enable();
+float motorToJointAngle(float motor_angle_rad) {
+    const float direction = kDirectionInverted ? -1.0f : 1.0f;
+    return wrapToPi(direction * (motor_angle_rad - kZeroOffsetRad));
+}
 
-    // 上电复位云台角度
-    YawMotor.setAngle(yaw_center);
-    PitchMotor.setAngle(pitch_center);
-    // 等待陀螺仪初始化完成
-    osDelay(pdMS_TO_TICKS(1000));
+bool isActive() {
+    return j1_state == SCARA_J1_STATE_POSITION || j1_state == SCARA_J1_STATE_SPEED;
+}
 
-    HAL_GPIO_WritePin(Laser_En_GPIO_Port,Laser_En_Pin,GPIO_PIN_RESET);
-    gimbal.enable();
-    osDelay(50);
-    gimbal.enable_stability();
-    // gimbal.disable();
-    while (true) {
-        while (ulTaskNotifyTake(pdTRUE, portMAX_DELAY) != pdPASS) {}
-        gimbal.Ctrl_ISR(INS_angle[0], INS_angle[1]);
+void disableMotor(ScaraJ1State next_state) {
+    (void)j1_motor.setCurrent(0.0f);
+    (void)j1_motor.disable();
+    j1_state = next_state;
+}
+
+void enterFault() {
+    disableMotor(SCARA_J1_STATE_FAULT);
+}
+
+bool enableAtZeroSpeed(uint32_t now_ms) {
+    const bool was_active = isActive();
+    if (!j1_motor.enable()) return false;
+    if (!j1_motor.setSpeed(0.0f)) return false;
+
+    j1_state = SCARA_J1_STATE_SPEED;
+    if (!was_active) active_since_tick = now_ms;
+    return true;
+}
+
+void processCommand(const ScaraJ1Command &command, uint32_t now_ms) {
+    last_host_command_tick = now_ms;
+
+    switch (command.type) {
+    case SCARA_J1_COMMAND_ENABLE:
+        if (j1_state == SCARA_J1_STATE_FAULT) break;
+        if (!enableAtZeroSpeed(now_ms)) enterFault();
+        break;
+
+    case SCARA_J1_COMMAND_DISABLE:
+        disableMotor(SCARA_J1_STATE_DISABLED);
+        break;
+
+    case SCARA_J1_COMMAND_SET_ANGLE: {
+        if (j1_state == SCARA_J1_STATE_FAULT || !std::isfinite(command.value)) break;
+        const bool was_active = isActive();
+
+        target_joint_angle_rad = std::clamp(
+            command.value, kMinJointAngleRad, kMaxJointAngleRad);
+
+        if (!j1_motor.enable() ||
+            !j1_motor.setAngle(jointToMotorAngle(target_joint_angle_rad))) {
+            enterFault();
+            break;
+        }
+
+        j1_state = SCARA_J1_STATE_POSITION;
+        if (!was_active) active_since_tick = now_ms;
+        break;
+    }
+
+    case SCARA_J1_COMMAND_SET_SPEED: {
+        if (j1_state == SCARA_J1_STATE_FAULT || !std::isfinite(command.value)) break;
+        const bool was_active = isActive();
+
+        const float speed_rpm = std::clamp(
+            command.value, -kMaxManualSpeedRpm, kMaxManualSpeedRpm);
+        if (!j1_motor.enable() || !j1_motor.setLowSpeed(speed_rpm)) {
+            enterFault();
+            break;
+        }
+
+        j1_state = SCARA_J1_STATE_SPEED;
+        if (!was_active) active_since_tick = now_ms;
+        break;
+    }
+
+    case SCARA_J1_COMMAND_STOP:
+        disableMotor(SCARA_J1_STATE_DISABLED);
+        break;
+
+    case SCARA_J1_COMMAND_CLEAR_FAULT:
+        disableMotor(SCARA_J1_STATE_DISABLED);
+        break;
+
+    case SCARA_J1_COMMAND_HEARTBEAT:
+        break;
+
+    default:
+        break;
+    }
+}
+
+void monitorSafety(uint32_t now_ms) {
+    if (!isActive()) return;
+
+    if ((now_ms - last_host_command_tick) > kHostWatchdogMs) {
+        enterFault();
+        return;
+    }
+
+    const bool feedback_grace_expired =
+        (now_ms - active_since_tick) > kFeedbackTimeoutMs;
+    if (feedback_grace_expired &&
+        !j1_motor.feedbackFresh(now_ms, kFeedbackTimeoutMs)) {
+        enterFault();
     }
 }
 
 void CAN_InterfaceInit() {
-    FDCAN_FilterTypeDef sFilterConfig;
-    sFilterConfig.IdType = FDCAN_STANDARD_ID;
-    sFilterConfig.FilterIndex = 0;
-    sFilterConfig.FilterType = FDCAN_FILTER_MASK;
-    sFilterConfig.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-    sFilterConfig.FilterID1 = 0x000;
-    sFilterConfig.FilterID2 = 0x7FF;
-    if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig) != HAL_OK) Error_Handler();
+    FDCAN_FilterTypeDef filter{};
+    filter.IdType = FDCAN_STANDARD_ID;
+    filter.FilterIndex = 0;
+    filter.FilterType = FDCAN_FILTER_MASK;
+    filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+    filter.FilterID1 = j1_motor.feedbackCanId();
+    filter.FilterID2 = 0x7FFU;
+
+    if (HAL_FDCAN_ConfigFilter(&hfdcan1, &filter) != HAL_OK) Error_Handler();
     if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK) Error_Handler();
-    if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK) Error_Handler();
+    if (HAL_FDCAN_ActivateNotification(
+            &hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0U) != HAL_OK) {
+        Error_Handler();
+    }
 }
 
-void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs) {
-    if (hfdcan == &hfdcan1) {
-        FDCAN_RxHeaderTypeDef rx_header;
-        uint8_t rx_data[8];
-        HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rx_header, rx_data);
-        if (rx_header.Identifier >= 0x500 && rx_header.Identifier <= 0x508) {
-            if (rx_header.Identifier == 0x500) {
-                YawMotor.update(rx_data);
-            } else if (rx_header.Identifier == 0x501) {
-                PitchMotor.update(rx_data);
-            }
+} // namespace
+
+extern "C" bool ScaraJ1_SubmitCommand(const ScaraJ1Command command) {
+    if (j1_command_queue == nullptr) return false;
+    return xQueueSend(j1_command_queue, &command, 0U) == pdPASS;
+}
+
+extern "C" bool ScaraJ1_GetStatus(ScaraJ1Status *status) {
+    if (status == nullptr) return false;
+
+    taskENTER_CRITICAL();
+    status->state = j1_state;
+    status->motor_enabled = j1_motor.enabled;
+    status->feedback_online = j1_motor.feedbackFresh(
+        HAL_GetTick(), kFeedbackTimeoutMs);
+    status->target_angle_rad = target_joint_angle_rad;
+    status->measured_angle_rad = motorToJointAngle(j1_motor.angle);
+    status->measured_speed_rpm = j1_motor.speed;
+    status->measured_current_a = j1_motor.current;
+    status->last_feedback_tick_ms = j1_motor.lastFeedbackTick();
+    taskEXIT_CRITICAL();
+    return true;
+}
+
+extern "C" void StartGimbalTask(void *argument) {
+    (void)argument;
+
+    j1_command_queue = xQueueCreate(12U, sizeof(ScaraJ1Command));
+    if (j1_command_queue == nullptr) Error_Handler();
+
+    CAN_InterfaceInit();
+    disableMotor(SCARA_J1_STATE_DISABLED);
+    last_host_command_tick = HAL_GetTick();
+
+    TickType_t last_wake_tick = xTaskGetTickCount();
+    for (;;) {
+        ScaraJ1Command command{};
+        while (xQueueReceive(j1_command_queue, &command, 0U) == pdPASS) {
+            processCommand(command, HAL_GetTick());
+        }
+
+        monitorSafety(HAL_GetTick());
+        vTaskDelayUntil(&last_wake_tick, pdMS_TO_TICKS(kControlPeriodMs));
+    }
+}
+
+extern "C" void HAL_FDCAN_RxFifo0Callback(
+    FDCAN_HandleTypeDef *hfdcan, uint32_t rx_fifo0_its) {
+    (void)rx_fifo0_its;
+    if (hfdcan != &hfdcan1) return;
+
+    while (HAL_FDCAN_GetRxFifoFillLevel(hfdcan, FDCAN_RX_FIFO0) > 0U) {
+        FDCAN_RxHeaderTypeDef rx_header{};
+        uint8_t rx_data[8]{};
+        if (HAL_FDCAN_GetRxMessage(
+                hfdcan, FDCAN_RX_FIFO0, &rx_header, rx_data) != HAL_OK) {
+            break;
+        }
+
+        if (rx_header.IdType == FDCAN_STANDARD_ID &&
+            rx_header.Identifier == j1_motor.feedbackCanId() &&
+            rx_header.DataLength == FDCAN_DLC_BYTES_8) {
+            (void)j1_motor.update(rx_data);
         }
     }
 }
