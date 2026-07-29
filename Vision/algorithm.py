@@ -470,6 +470,7 @@ def find_rectangle_solution(
     ),
     dimension_tolerance_mm: float = 3.0,
     max_search_nodes: int = 5_000,
+    diagnostics: Optional[Dict] = None,
 ) -> Optional[Dict]:
     """寻找一个互不重叠且组合后能够填满矩形的布局。
 
@@ -524,6 +525,26 @@ def find_rectangle_solution(
     }
     best_solution: Optional[Dict] = None
     search_nodes = 0
+    stats = {
+        "search_nodes": 0,
+        "max_search_nodes": max_search_nodes,
+        "search_limit_reached": False,
+        "root_candidate_count": 0,
+        "candidate_states": 0,
+        "full_edge_candidates": 0,
+        "partial_edge_candidates": 0,
+        "overlap_rejections": 0,
+        "geometry_rejections": 0,
+        "complete_layouts": 0,
+        "invalid_rectangle_rejections": 0,
+        "dimension_rejections": 0,
+        "area_rejections": 0,
+        "no_candidate_nodes": 0,
+        "candidate_counts_by_depth": [],
+        "anchor_index": anchor_index,
+        "piece_count": len(prepared),
+        "total_piece_area_mm2": total_piece_area,
+    }
 
     def partial_geometry_valid(candidate_polygons: Iterable[Sequence[Pt]]) -> bool:
         if size_range_mm is None:
@@ -558,12 +579,16 @@ def find_rectangle_solution(
         ]
         rectangle = minimum_area_rectangle(all_points)
         if rectangle is None or rectangle["area"] <= EPS:
+            stats["invalid_rectangle_rejections"] += 1
             return False
+        stats["complete_layouts"] += 1
         if not _dimensions_valid(rectangle, size_range_mm, dimension_tolerance_mm):
+            stats["dimension_rejections"] += 1
             return False
 
         area_error = abs(rectangle["area"] - total_piece_area) / rectangle["area"]
         if area_error > rectangle_area_tolerance:
+            stats["area_rejections"] += 1
             return False
 
         score = area_error * 10.0 + edge_error / max(1, len(prepared) - 1)
@@ -584,7 +609,9 @@ def find_rectangle_solution(
     def recurse(edge_error: float) -> bool:
         nonlocal search_nodes
         search_nodes += 1
+        stats["search_nodes"] = search_nodes
         if search_nodes > max_search_nodes:
+            stats["search_limit_reached"] = True
             return False
         if len(poses) == len(prepared):
             return evaluate(edge_error)
@@ -644,10 +671,12 @@ def find_rectangle_solution(
                                 )
                                 for placed_polygon in world_polygons.values()
                             ):
+                                stats["overlap_rejections"] += 1
                                 continue
                             if not partial_geometry_valid(
                                 list(world_polygons.values()) + [candidate_polygon]
                             ):
+                                stats["geometry_rejections"] += 1
                                 continue
 
                             partial_rectangle = minimum_area_rectangle(
@@ -676,6 +705,10 @@ def find_rectangle_solution(
                                 + length_error / max(fixed_length, moving_length)
                             )
                             full_edge_match = length_error <= allowed_error
+                            if full_edge_match:
+                                stats["full_edge_candidates"] += 1
+                            else:
+                                stats["partial_edge_candidates"] += 1
                             priority = seam_error + 0.5 * empty_area_ratio
                             candidates.append(
                                 (
@@ -692,6 +725,15 @@ def find_rectangle_solution(
                                     priority,
                                 )
                             )
+
+        stats["candidate_states"] += len(candidates)
+        if not candidates:
+            stats["no_candidate_nodes"] += 1
+        if len(poses) == 1:
+            stats["root_candidate_count"] = len(candidates)
+        stats["candidate_counts_by_depth"].append(
+            {"pieces_already_placed": len(poses), "candidate_count": len(candidates)}
+        )
 
         # 精确整边接缝的可信度远高于局部接触。该排序会优先恢复普通切割产生
         # 的碎片对，只在确有需要时才回退到 T 形接缝布局。
@@ -730,6 +772,9 @@ def find_rectangle_solution(
         return False
 
     recurse(0.0)
+    if diagnostics is not None:
+        diagnostics.clear()
+        diagnostics.update(stats)
     if best_solution is None:
         return None
 

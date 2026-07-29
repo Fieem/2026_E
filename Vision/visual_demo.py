@@ -135,10 +135,10 @@ def render_solution(
     image = Image.new("RGB", (WIDTH, HEIGHT), (246, 247, 249))
     draw = ImageDraw.Draw(image)
 
-    draw.text((35, 22), "碎片拼矩形：纯几何求解结果", fill=(25, 25, 25), font=TITLE_FONT)
-    draw.text((35, 53), f"随机种子={seed}，顶点噪声=±{noise:g} mm", fill=(90, 90, 90), font=SMALL_FONT)
-    draw.text((35, 84), "拼接前：视觉识别到的碎片", fill=(25, 25, 25), font=TEXT_FONT)
-    draw.text((720, 84), "拼接后：算法计算出的目标位置", fill=(25, 25, 25), font=TEXT_FONT)
+    draw.text((35, 22), "Rectangle puzzle: geometry-only result", fill=(25, 25, 25), font=TITLE_FONT)
+    draw.text((35, 53), f"seed={seed}, vertex noise=+/-{noise:g} mm", fill=(90, 90, 90), font=SMALL_FONT)
+    draw.text((35, 84), "BEFORE: observed pieces", fill=(25, 25, 25), font=TEXT_FONT)
+    draw.text((720, 84), "AFTER: computed placement", fill=(25, 25, 25), font=TEXT_FONT)
 
     for panel in (LEFT_PANEL, RIGHT_PANEL):
         draw.rounded_rectangle(panel, radius=12, fill=(255, 255, 255), outline=(205, 210, 218), width=2)
@@ -167,8 +167,8 @@ def render_solution(
         (solution["rectangle"]["width"], solution["rectangle"]["height"])
     )
     status = (
-        f"矩形判定通过    尺寸={long_side:.1f} × {short_side:.1f} mm    "
-        f"未覆盖面积={solution['area_error'] * 100:.2f}%"
+        f"VALID RECTANGLE   size={long_side:.1f} x {short_side:.1f} mm   "
+        f"uncovered={solution['area_error'] * 100:.2f}%"
     )
     draw.rounded_rectangle((35, 600, 1365, 642), radius=9, fill=(224, 247, 232), outline=(65, 160, 95), width=2)
     draw.text((54, 610), status, fill=(25, 105, 55), font=TEXT_FONT)
@@ -179,8 +179,8 @@ def render_solution(
         angle_deg = math.degrees(placement["angle"])
         target = placement["target_center"]
         text = (
-            f"碎片 {index}：旋转 {angle_deg:+.1f}°  →  "
-            f"目标中心 ({target.x:.1f}, {target.y:.1f}) mm"
+            f"Piece {index}: rotate {angle_deg:+.1f} deg  ->  "
+            f"target ({target.x:.1f}, {target.y:.1f}) mm"
         )
         draw.text((x, 667 + (index % 2) * 30), text, fill=COLORS[index], font=TEXT_FONT)
         if index % 2 == 1:

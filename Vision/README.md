@@ -61,7 +61,8 @@ python -m unittest -v test_algorithm.py
 
 ## 生成可视化结果
 
-执行以下命令生成“拼接前/拼接后”中文对照图：
+执行以下命令生成“拼接前/拼接后”对照图。为避免树莓派缺少中文字体，
+图片内的标题和状态使用英文，代码注释、终端信息和 JSON 仍使用中文：
 
 ```powershell
 python visual_demo.py --seed 29 --noise 1.0 --output rectangle_demo.png
@@ -86,7 +87,7 @@ python visual_demo.py --seed 29 --noise 1.0 --output rectangle_demo.png
 
 ```bash
 sudo apt update
-sudo apt install -y python3-opencv python3-numpy python3-pil python3-picamera2 fonts-noto-cjk
+sudo apt install -y python3-opencv python3-numpy python3-pil python3-picamera2
 ```
 
 使用 CSI 摄像头前，可先确认摄像头能够正常采集：
@@ -97,11 +98,11 @@ rpicam-hello
 
 ### 2. 准备工作区
 
-默认配置文件 [vision_config.json](vision_config.json) 将工作区设置为横向 A4：
+默认配置文件 [vision_config.json](vision_config.json) 将工作区设置为竖向 A4：
 
-- 宽度：297 mm；
-- 高度：210 mm；
-- 拼接目标中心：`(148.5, 105.0) mm`；
+- 宽度：210 mm；
+- 高度：297 mm；
+- 拼接目标中心：`(105.0, 148.5) mm`；
 - 推荐背景：哑光黑色或深蓝色；
 - 推荐碎片：比背景明显更亮。
 
@@ -147,7 +148,49 @@ python3 camera_pipeline.py --source usb --device 0 --display
 python3 camera_pipeline.py --image test.jpg --display
 ```
 
-### 5. 连续运行
+### 5. 按键触发运行（推荐）
+
+平时只显示摄像头预览，不执行轮廓提取和矩形求解。按下空格键后，程序会
+抓取当前画面并检测一次，完成后重新回到待机状态：
+
+```bash
+python3 camera_pipeline.py --source picamera2 --triggered --display
+```
+
+- 空格键：检测当前画面一次；
+- `Q` 或 `Esc`：退出程序；
+- 每次检测结果都会覆盖更新到 `Vision/output`。
+
+如果需要调节深蓝背景的分割效果，可以打开调试窗口：
+
+```bash
+python3 camera_pipeline.py --source picamera2 --debug --display
+```
+
+调试窗口包含四个区域：
+
+- `CORRECTED`：透视矫正后的工作区；
+- `GRAY`：灰度图；
+- `BINARY MASK`：实际送入轮廓提取的二值图；
+- `CONTOURS`：当前二值图检测出的外轮廓。
+
+调试时拖动两个滑条：
+
+- `Threshold (0=Otsu)`：阈值，0 表示自动阈值；
+- `Morphology x0.1mm`：形态学开闭运算尺度。
+
+确认二值图中碎片为白色、深蓝背景为黑色后，按空格使用当前滑条参数执行
+一次矩形求解。按 `S` 可将当前参数直接保存到 `vision_config.json`。
+
+如果树莓派没有连接显示器，可以使用终端触发模式：
+
+```bash
+python3 camera_pipeline.py --source picamera2 --triggered
+```
+
+在终端中按回车检测一次，输入 `Q` 后按回车退出。
+
+### 6. 连续运行（仅用于调试）
 
 带显示窗口运行：
 
@@ -163,7 +206,7 @@ python3 camera_pipeline.py --source picamera2 --continuous
 
 按 `Q` 或 `Esc` 退出显示窗口。无显示器连续运行时可使用 `Ctrl+C` 停止。
 
-### 6. 输出文件
+### 7. 输出文件
 
 程序持续更新 `Vision/output` 中的以下文件：
 
@@ -177,7 +220,29 @@ python3 camera_pipeline.py --source picamera2 --continuous
 只有当 JSON 中的 `status` 为 `ok` 时，机械臂控制程序才允许读取并执行
 `solution.placements`。其他状态都必须保持机械臂停止。
 
-### 7. 常用分割参数
+JSON 中的坐标仍然属于相机工作区坐标，不能未经转换就直接作为机械臂坐标。
+联动机械臂之前，还需要标定“相机工作区坐标 → SCARA 基坐标”的二维刚体或
+仿射变换。
+
+### 失败原因诊断
+
+当矩形求解失败时，终端会输出：
+
+- 首层接缝候选数量；
+- 完整布局数量；
+- 整边和局部边候选数量；
+- 重叠、尺寸范围和面积误差排除数量；
+- 每块碎片的边数、面积和边长。
+
+常见判断方法：
+
+- `首层候选 0`：优先检查四点标定、像素到毫米比例和轮廓角点；
+- `完整布局 0`：轮廓形状、顶点顺序或接缝方向可能错误；
+- `矩形尺寸` 排除较多：工作区比例或碎片尺寸识别可能不正确；
+- `面积` 排除较多：碎片之间有缝隙、重叠，或轮廓包含了背景；
+- `节点达到上限`：边长容差过大，或者拟合出了过多错误角点。
+
+### 8. 常用分割参数
 
 这些参数位于 `vision_config.json`：
 

@@ -4,16 +4,31 @@
     "height": 1200
   },
   "workspace": {
-    "width_mm": 297.0,
-    "height_mm": 210.0,
+    "width_mm": 210.0,
+    "height_mm": 297.0,
     "pixels_per_mm": 4.0,
     "image_points": [
-      [0, 0],
-      [1599, 0],
-      [1599, 1199],
-      [0, 1199]
+      [
+        591,
+        237
+      ],
+      [
+        1147,
+        214
+      ],
+      [
+        1161,
+        1002
+      ],
+      [
+        612,
+        1004
+      ]
     ],
-    "target_center_mm": [148.5, 105.0]
+    "target_center_mm": [
+      105.0,
+      148.5
+    ]
   },
   "segmentation": {
     "mode": "light_on_dark",
