@@ -69,34 +69,34 @@ static void comm_pi_parse_line(const char *line)
     char *cmd = strtok_r(work, ",", &saveptr);
     if (cmd == NULL) return;
 
-    if (strcmp_upper(cmd, "PULSES") == 0) {
-        /* PULSES,<pick_p1>,<pick_p2>,<place_p1>,<place_p2> */
+    if (strcmp_upper(cmd, "TASK") == 0) {
+        /* TASK,<arm_start>,<rot_start>,<arm_end>,<rot_place> */
         char *a1 = strtok_r(NULL, ",", &saveptr);
         char *a2 = strtok_r(NULL, ",", &saveptr);
         char *a3 = strtok_r(NULL, ",", &saveptr);
         char *a4 = strtok_r(NULL, ",", &saveptr);
         if (a1 && a2 && a3 && a4) {
-            comm_pick_p1  = atoi(a1);
-            comm_pick_p2  = atoi(a2);
-            comm_place_p1 = atoi(a3);
-            comm_place_p2 = atoi(a4);
-            comm_response_ready = true;
-            printsf(0, "PULSES OK %d %d %d %d", comm_pick_p1, comm_pick_p2, comm_place_p1, comm_place_p2);
+            comm_arm_start = atoi(a1);
+            comm_rot_start = atoi(a2);
+            comm_arm_end   = atoi(a3);
+            comm_rot_place = atoi(a4);
+            comm_task_ready = true;
+            printsf(0, "TASK OK %d %d %d %d",
+                    comm_arm_start, comm_rot_start, comm_arm_end, comm_rot_place);
+        } else {
+            printsf(0, "TASK PARAM");
         }
-        else{printsf(0,"Pulse");}
     }
     else if (strcmp_upper(cmd, "ERROR") == 0) {
         /* ERROR,<code>,<message> */
         char *code = strtok_r(NULL, ",", &saveptr);
         char *msg  = strtok_r(NULL, ",", &saveptr);
         printsf(0, "ERR %s: %s", code ? code : "?", msg ? msg : "");
-        comm_response_ready = false;
     }
     else if (strcmp_upper(cmd, "BUSY") == 0) {
         /* BUSY,<message> */
         char *msg = strtok_r(NULL, ",", &saveptr);
         printsf(0, "BUSY: %s", msg ? msg : "");
-        comm_response_ready = false;
     }
     /* 未知命令 → 静默忽略 */
 }
