@@ -42,6 +42,7 @@ typedef struct {
 
 typedef enum {
     SCARA_J1_STATE_DISABLED = 0,
+    SCARA_J1_STATE_HOMING,
     SCARA_J1_STATE_POSITION,
     SCARA_J1_STATE_SPEED,
     SCARA_J1_STATE_FAULT,

@@ -22,6 +22,10 @@ ScaraJ1State j1_state = SCARA_J1_STATE_DISABLED;
 float target_joint_angle_rad = 0.0f;
 uint32_t last_host_command_tick = 0U;
 uint32_t active_since_tick = 0U;
+bool startup_homing_active = false;
+bool startup_home_command_sent = false;
+uint32_t startup_home_started_tick = 0U;
+uint32_t startup_home_stable_since_tick = 0U;
 
 float wrapToTwoPi(float angle_rad) {
     angle_rad = std::fmod(angle_rad, kTwoPi);
@@ -44,6 +48,12 @@ float motorToJointAngle(float motor_angle_rad) {
 }
 
 bool isActive() {
+    return j1_state == SCARA_J1_STATE_HOMING ||
+           j1_state == SCARA_J1_STATE_POSITION ||
+           j1_state == SCARA_J1_STATE_SPEED;
+}
+
+bool hostWatchdogEnabled() {
     return j1_state == SCARA_J1_STATE_POSITION || j1_state == SCARA_J1_STATE_SPEED;
 }
 
@@ -55,6 +65,9 @@ void disableMotor(ScaraJ1State next_state) {
 
 void enterFault() {
     disableMotor(SCARA_J1_STATE_FAULT);
+    startup_homing_active = false;
+    startup_home_command_sent = false;
+    startup_home_stable_since_tick = 0U;
 }
 
 bool enableAtZeroSpeed(uint32_t now_ms) {
@@ -68,6 +81,8 @@ bool enableAtZeroSpeed(uint32_t now_ms) {
 }
 
 void processCommand(const ScaraJ1Command &command, uint32_t now_ms) {
+    if (startup_homing_active) return;
+
     last_host_command_tick = now_ms;
 
     switch (command.type) {
@@ -130,10 +145,59 @@ void processCommand(const ScaraJ1Command &command, uint32_t now_ms) {
     }
 }
 
+void startStartupHome(uint32_t now_ms) {
+    startup_homing_active = true;
+    startup_home_command_sent = false;
+    startup_home_started_tick = now_ms;
+    startup_home_stable_since_tick = 0U;
+    target_joint_angle_rad = kStartupHomeJointAngleRad;
+    j1_state = SCARA_J1_STATE_HOMING;
+}
+
+void updateStartupHome(uint32_t now_ms) {
+    if (!startup_homing_active) return;
+
+    if ((now_ms - startup_home_started_tick) > kStartupHomeTimeoutMs) {
+        enterFault();
+        return;
+    }
+
+    if (!startup_home_command_sent) {
+        if (!j1_motor.enable() ||
+            !j1_motor.setAngle(jointToMotorAngle(kStartupHomeJointAngleRad))) {
+            enterFault();
+            return;
+        }
+        startup_home_command_sent = true;
+        active_since_tick = now_ms;
+    }
+
+    if (!j1_motor.feedbackFresh(now_ms, kFeedbackTimeoutMs)) return;
+
+    const float measured_joint_angle = motorToJointAngle(j1_motor.angle);
+    const float error_rad = std::fabs(measured_joint_angle - kStartupHomeJointAngleRad);
+    if (error_rad > kStartupHomeToleranceRad) {
+        startup_home_stable_since_tick = 0U;
+        return;
+    }
+
+    if (startup_home_stable_since_tick == 0U) {
+        startup_home_stable_since_tick = now_ms;
+        return;
+    }
+
+    if ((now_ms - startup_home_stable_since_tick) < kStartupHomeStableMs) return;
+
+    startup_homing_active = false;
+    startup_home_command_sent = false;
+    startup_home_stable_since_tick = 0U;
+    j1_state = SCARA_J1_STATE_POSITION;
+}
+
 void monitorSafety(uint32_t now_ms) {
     if (!isActive()) return;
 
-    if ((now_ms - last_host_command_tick) > kHostWatchdogMs) {
+    if (hostWatchdogEnabled() && (now_ms - last_host_command_tick) > kHostWatchdogMs) {
         enterFault();
         return;
     }
@@ -196,6 +260,9 @@ extern "C" void StartGimbalTask(void *argument) {
     CAN_InterfaceInit();
     disableMotor(SCARA_J1_STATE_DISABLED);
     last_host_command_tick = HAL_GetTick();
+    if (kStartupHomeEnabled) {
+        startStartupHome(last_host_command_tick);
+    }
 
     TickType_t last_wake_tick = xTaskGetTickCount();
     for (;;) {
@@ -204,6 +271,7 @@ extern "C" void StartGimbalTask(void *argument) {
             processCommand(command, HAL_GetTick());
         }
 
+        updateStartupHome(HAL_GetTick());
         Vision_Poll();
         monitorSafety(HAL_GetTick());
         vTaskDelayUntil(&last_wake_tick, pdMS_TO_TICKS(kControlPeriodMs));
