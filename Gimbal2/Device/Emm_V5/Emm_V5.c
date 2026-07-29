@@ -1713,12 +1713,12 @@ bool Emm_V5_Is_PosReached(uint8_t addr)
   *         查询两个电机的 S_FLAG Prf_TF 到位标志。
   *         CAN 无应答则静默跳过，下一次循环重试。
   */
-void Is_Arrived(void)
-{
-    if (Emm_V5_Is_PosReached(1) && Emm_V5_Is_PosReached(2)) {
-        arrive_flag = true;
-    }
-}
+// void Is_Arrived(void)
+// {
+//     if (Emm_V5_Is_PosReached(1) && Emm_V5_Is_PosReached(2)) {
+//         arrive_flag = true;
+//     }
+// }
 /**
     * @brief  读取电机PID参数（阻塞等待应答）
     * @param  addr   电机ID
@@ -1854,27 +1854,27 @@ void Move(uint8_t addr, int32_t position)
 }
 
 /**
-  * @brief  控制步进电机旋转指定角度（相对位置模式）
-  * @param  addr    ：电机地址（1=Yaw, 2=Pitch）
-  * @param  degrees ：旋转角度，正值 CW，负值 CCW，支持小数
+  * @brief  控制步进电机旋转到绝对角度位置
+  * @param  addr    ：电机地址（1=机械臂, 2=旋转）
+  * @param  degrees ：目标绝对角度，正值 CW，负值 CCW，支持小数
   * @note   脉冲换算：pulses = |degrees| × 3200 / 360
-  *         例如 90.0° → 800 脉冲，-45.5° → 404 脉冲 CCW
-  *         raF=false 表示相对运动（基于当前位置），非阻塞立即返回
+  *         raF=true 绝对位置模式，非阻塞立即返回
   */
 void Rotate(uint8_t addr, float degrees)
 {
-    uint8_t  dir = (degrees >= 0.0f) ? 0 : 1;        // 0=CW, 1=CCW
+    uint8_t  dir    = (degrees >= 0.0f) ? 0 : 1;
     float    abs_deg = (degrees > 0.0f) ? degrees : -degrees;
-
-    /* degrees → pulses，四舍五入 */
     uint32_t pulses = (uint32_t)(abs_deg * (float)PULSES_PER_REV / 360.0f + 0.5f);
 
-    if (pulses == 0) {
-        return;  /* 0° 不发送指令 */
-    }
-
     Emm_V5_Pos_Control(addr, dir, ROTATE_VEL, ROTATE_ACC,
-                       pulses, false, false);
-    //                      raF=false: 相对运动
-    //                      snF=false: 不启用多机同步
+                       pulses, true, false);
+    //                      raF=true: 绝对位置模式
+
+    /* 更新对应轴 last_pos */
+    int32_t signed_pos = (degrees >= 0.0f) ? (int32_t)pulses : -(int32_t)pulses;
+    if (addr == 1) {
+        last_pos_yaw   = signed_pos;
+    } else if (addr == 2) {
+        last_pos_pitch = signed_pos;
+    }
 }

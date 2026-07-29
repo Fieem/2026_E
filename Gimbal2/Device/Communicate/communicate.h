@@ -30,4 +30,5 @@ void comm_send_place(char color, uint8_t num, uint8_t row, uint8_t col);
 void comm_send_battle_start(char color);
 void comm_send_ready(void);
 void comm_send_new(void);
+void comm_send_finish(void);
 #endif //INC_2024E_COMMUNICATE_H
