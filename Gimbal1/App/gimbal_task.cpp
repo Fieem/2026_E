@@ -71,7 +71,7 @@ bool isActive() {
 }
 
 bool hostWatchdogEnabled() {
-    return j1_state == SCARA_J1_STATE_POSITION || j1_state == SCARA_J1_STATE_SPEED;
+    return false;
 }
 
 void disableMotor(ScaraJ1State next_state) {
@@ -102,8 +102,6 @@ bool enableAtZeroSpeed(uint32_t now_ms) {
 
 void processCommand(const ScaraJ1Command &command, uint32_t now_ms) {
     if (startup_homing_active) return;
-
-    last_host_command_tick = now_ms;
 
     switch (command.type) {
     case SCARA_J1_COMMAND_ENABLE:
@@ -198,6 +196,20 @@ void startExecution(const ScaraVisionResult &result, uint32_t now_ms) {
     execute_piece_index = 0U;
     Gimbal2Link_ClearFlags();
     startExecuteStage(ExecuteState::MoveJ1ToPick, now_ms);
+}
+
+void updateVisionStartTrigger(uint32_t now_ms) {
+    if (startup_homing_active || j1_state == SCARA_J1_STATE_FAULT) return;
+    if (execute_state != ExecuteState::Idle) return;
+
+    Gimbal2LinkStatus gimbal2_status{};
+    (void)Gimbal2Link_GetStatus(&gimbal2_status);
+    if (!gimbal2_status.ready_flag) return;
+    if (Vision_GetState() == SCARA_VISION_STATE_WAITING) return;
+
+    (void)Vision_RequestStart();
+    Gimbal2Link_ClearFlags();
+    last_host_command_tick = now_ms;
 }
 
 void updateExecution(uint32_t now_ms) {
@@ -301,7 +313,10 @@ void updateStartupHome(uint32_t now_ms) {
     if (!startup_homing_active) return;
 
     if ((now_ms - startup_home_started_tick) > kStartupHomeTimeoutMs) {
-        enterFault();
+        startup_homing_active = false;
+        startup_home_command_sent = false;
+        startup_home_stable_since_tick = 0U;
+        j1_state = SCARA_J1_STATE_POSITION;
         return;
     }
 
@@ -338,19 +353,7 @@ void updateStartupHome(uint32_t now_ms) {
 }
 
 void monitorSafety(uint32_t now_ms) {
-    if (!isActive()) return;
-
-    if (hostWatchdogEnabled() && (now_ms - last_host_command_tick) > kHostWatchdogMs) {
-        enterFault();
-        return;
-    }
-
-    const bool feedback_grace_expired =
-        (now_ms - active_since_tick) > kFeedbackTimeoutMs;
-    if (feedback_grace_expired &&
-        !j1_motor.feedbackFresh(now_ms, kFeedbackTimeoutMs)) {
-        enterFault();
-    }
+    (void)now_ms;
 }
 
 void CAN_InterfaceInit() {
@@ -401,7 +404,6 @@ extern "C" void StartGimbalTask(void *argument) {
     if (j1_command_queue == nullptr) Error_Handler();
 
     CAN_InterfaceInit();
-    disableMotor(SCARA_J1_STATE_DISABLED);
     last_host_command_tick = HAL_GetTick();
     if (kStartupHomeEnabled) {
         startStartupHome(last_host_command_tick);
@@ -416,6 +418,7 @@ extern "C" void StartGimbalTask(void *argument) {
         }
 
         updateStartupHome(now_ms);
+        updateVisionStartTrigger(now_ms);
         updateExecution(now_ms);
         Vision_Poll();
         monitorSafety(now_ms);

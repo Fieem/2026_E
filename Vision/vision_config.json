@@ -9,20 +9,20 @@
     "pixels_per_mm": 4.0,
     "image_points": [
       [
-        608,
-        237
+        600,
+        302
       ],
       [
-        1159,
-        211
+        1158,
+        272
       ],
       [
         1174,
-        998
+        1059
       ],
       [
-        631,
-        1001
+        632,
+        1061
       ]
     ],
     "target_center_mm": [
@@ -32,7 +32,7 @@
   },
   "segmentation": {
     "mode": "light_on_dark",
-    "threshold": 120,
+    "threshold": 70,
     "blur_size": 5,
     "morphology_mm": 0.8,
     "polygon_epsilon_mm": 1.2,
