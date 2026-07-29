@@ -223,4 +223,12 @@ extern  bool Emm_V5_Get_PID_Params(uint8_t addr, uint32_t *kp, uint32_t *ki, uin
 void Is_Arrived();
 void Move_Pos(int32_t x, int32_t y);
 void Arm_Execute_Pick_Place(int32_t pick_x, int32_t pick_y, int32_t place_x, int32_t place_y);
+
+/* ---- 旋转控制 ---- */
+#define PULSES_PER_REV     3200U   /* 1.8° 步进电机 × 16 细分 = 3200 脉冲/圈 */
+#define ROTATE_VEL         50U     /* 旋转默认速度(RPM)    */
+#define ROTATE_ACC         10U     /* 旋转默认加速度       */
+
+void Rotate(uint8_t addr, float degrees);
+void Move(uint8_t addr, int32_t position);
 #endif

@@ -130,8 +130,9 @@ static int test_vofa_apply_kv(const char *key, float value) {
         return 1;
     }
     if (test_key_equal(key, "ON")) {
-        comm_send_new();
-        printsf(0,"NEW");
+        Magnet_ON();
+        printsf(0,"ON");
+        // printsf(0,"NEW");
         // Emm_V5_Modify_PID_Params(1,true,18000,0,1024000);
         // Emm_V5_Modify_PID_Params(2,true,18000,0,102400);
         return 1;

@@ -28,6 +28,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
+#include <stdio.h>
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -98,6 +100,7 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
+  HAL_Delay(100);
 
   /* USER CODE END 2 */
 
@@ -167,7 +170,12 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-
+int __io_putchar(int ch,FILE *f)
+{
+  uint8_t temp[1]={ch};
+  HAL_UART_Transmit(&huart3,temp,1,0xFFFF);
+  return ch;
+}
 /* USER CODE END 4 */
 
 /**
@@ -203,6 +211,8 @@ void Error_Handler(void)
   __disable_irq();
   while (1)
   {
+    HAL_GPIO_TogglePin(GPIOF, GPIO_PIN_9);
+    osDelay(500);
   }
   /* USER CODE END Error_Handler_Debug */
 }
