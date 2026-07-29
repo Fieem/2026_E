@@ -4,6 +4,7 @@
 #include "FreeRTOS.h"
 #include "queue.h"
 
+#include "gimbal2_link.h"
 #include "main.h"
 #include "scara_protocol.h"
 #include "usart.h"
@@ -116,13 +117,15 @@ extern "C" void StartReceiveTask(void *argument) {
     uart_queue = xQueueCreate(10U, sizeof(RawPacket));
     if (uart_queue == nullptr) Error_Handler();
 
+    Gimbal2Link_Init();
     if (HAL_UART_Receive_IT(&huart1, uart1_rx_byte, 1U) != HAL_OK) Error_Handler();
 
     for (;;) {
-        if (xQueueReceive(uart_queue, &raw_packet, portMAX_DELAY) == pdPASS &&
+        if (xQueueReceive(uart_queue, &raw_packet, pdMS_TO_TICKS(5U)) == pdPASS &&
             decodeFrame(raw_packet, frame)) {
             processFrame(frame);
         }
+        Gimbal2Link_Poll();
     }
 }
 
@@ -173,6 +176,12 @@ extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 
         (void)HAL_UART_Receive_IT(huart, uart1_rx_byte, 1U);
         portYIELD_FROM_ISR(higher_priority_task_woken);
+        return;
+    }
+
+    if (huart->Instance == USART10) {
+        Gimbal2Link_RingPush(gimbal2_link_rx_byte);
+        (void)HAL_UART_Receive_IT(huart, &gimbal2_link_rx_byte, 1U);
     }
 }
 
@@ -181,5 +190,7 @@ extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
 
     if (huart->Instance == USART1) {
         (void)HAL_UART_Receive_IT(huart, uart1_rx_byte, 1U);
+    } else if (huart->Instance == USART10) {
+        (void)HAL_UART_Receive_IT(huart, &gimbal2_link_rx_byte, 1U);
     }
 }

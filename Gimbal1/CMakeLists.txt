@@ -49,6 +49,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         App/receive_task.cpp
         App/gimbal_task.cpp
         App/vision_comm.cpp
+        App/gimbal2_link.cpp
         Device/QD4310/QD4310.cpp
 )
 
