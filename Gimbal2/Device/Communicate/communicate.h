@@ -1,6 +1,6 @@
 //
 // Created by Administrator on 2026/7/13.
-// 树莓派通信 - USART1, 921600, PA9/PA10
+// 上位机通信 - USART1, 921600, PA9/PA10
 // 文本协议: 逗号分隔，单行一条消息，\n 结尾
 //
 
@@ -25,10 +25,9 @@ void comm_pi_poll(void);
 /* ---- ISR 安全写入环形缓冲区 ---- */
 void comm_pi_ring_push(uint8_t byte);
 
-/* ---- 发送请求给树莓派 ---- */
-void comm_send_place(char color, uint8_t num, uint8_t row, uint8_t col);
-void comm_send_battle_start(char color);
+/* ---- 发送 ---- */
 void comm_send_ready(void);
-void comm_send_new(void);
+void comm_send_pick(void);
 void comm_send_finish(void);
+
 #endif //INC_2024E_COMMUNICATE_H
