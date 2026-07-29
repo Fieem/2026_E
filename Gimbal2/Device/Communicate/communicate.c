@@ -142,17 +142,17 @@ void comm_pi_poll(void)
 void comm_send_ready(void)
 {
     const char *msg = "READY\n";
-    HAL_UART_Transmit(&huart1, (uint8_t *)msg, 5, 100);
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
 }
 
 void comm_send_pick(void)
 {
     const char *msg = "PICK\n";
-    HAL_UART_Transmit(&huart1, (uint8_t *)msg, 4, 100);
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
 }
 
 void comm_send_finish(void)
 {
     const char *msg = "FINISH\n";
-    HAL_UART_Transmit(&huart1, (uint8_t *)msg, 6, 100);
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
 }
