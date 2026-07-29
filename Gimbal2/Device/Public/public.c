@@ -13,7 +13,5 @@ ArmState_t arm_state = ARM_IDLE;
 
 /* ---- TASK 协议解析结果 ---- */
 bool    comm_task_ready = false;
-int32_t comm_arm_start  = 0;
-int32_t comm_rot_start  = 0;
-int32_t comm_arm_end    = 0;
-int32_t comm_rot_place  = 0;
+int32_t comm_angle1     = 0;
+int32_t comm_angle2     = 0;

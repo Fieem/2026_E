@@ -1,6 +1,6 @@
 //
 // Created by Administrator on 2026/7/13.
-// 树莓派通信 - 文本协议解析与收发
+// 上位机通信 - 文本协议解析与收发
 // 协议: 逗号分隔，单行一条消息，\n 结尾
 //
 
@@ -46,12 +46,12 @@ static int comm_pi_ring_pop(uint8_t *out)
 static char    s_comm_frame_buf[COMM_FRAME_MAX_LEN];
 static uint8_t s_comm_frame_len = 0U;
 
-/* ---- 忽略大小写字符串比较（仅全大写 ASCII 命令） ---- */
+/* ---- 忽略大小写字符串比较 ---- */
 static int strcmp_upper(const char *a, const char *b_upper)
 {
     while (*a && *b_upper) {
         char ca = *a;
-        if (ca >= 'a' && ca <= 'z') ca -= 32;   /* 转大写 */
+        if (ca >= 'a' && ca <= 'z') ca -= 32;
         if (ca != *b_upper) return 1;
         a++; b_upper++;
     }
@@ -70,31 +70,24 @@ static void comm_pi_parse_line(const char *line)
     if (cmd == NULL) return;
 
     if (strcmp_upper(cmd, "TASK") == 0) {
-        /* TASK,<arm_start>,<rot_start>,<arm_end>,<rot_place> */
+        /* TASK,<angle1>,<angle2> */
         char *a1 = strtok_r(NULL, ",", &saveptr);
         char *a2 = strtok_r(NULL, ",", &saveptr);
-        char *a3 = strtok_r(NULL, ",", &saveptr);
-        char *a4 = strtok_r(NULL, ",", &saveptr);
-        if (a1 && a2 && a3 && a4) {
-            comm_arm_start = atoi(a1);
-            comm_rot_start = atoi(a2);
-            comm_arm_end   = atoi(a3);
-            comm_rot_place = atoi(a4);
+        if (a1 && a2) {
+            comm_angle1 = atoi(a1);
+            comm_angle2 = atoi(a2);
             comm_task_ready = true;
-            printsf(0, "TASK OK %d %d %d %d",
-                    comm_arm_start, comm_rot_start, comm_arm_end, comm_rot_place);
+            printsf(0, "TASK %d %d", comm_angle1, comm_angle2);
         } else {
             printsf(0, "TASK PARAM");
         }
     }
     else if (strcmp_upper(cmd, "ERROR") == 0) {
-        /* ERROR,<code>,<message> */
         char *code = strtok_r(NULL, ",", &saveptr);
         char *msg  = strtok_r(NULL, ",", &saveptr);
         printsf(0, "ERR %s: %s", code ? code : "?", msg ? msg : "");
     }
     else if (strcmp_upper(cmd, "BUSY") == 0) {
-        /* BUSY,<message> */
         char *msg = strtok_r(NULL, ",", &saveptr);
         printsf(0, "BUSY: %s", msg ? msg : "");
     }
@@ -105,10 +98,9 @@ static void comm_pi_parse_line(const char *line)
 static void comm_pi_feed_byte(uint8_t byte)
 {
     if (byte == '\r') {
-        return;   /* 忽略 CR，只等 LF */
+        return;
     }
     if (byte == '\n') {
-        /* 行结束 → 解析 */
         s_comm_frame_buf[s_comm_frame_len] = '\0';
         if (s_comm_frame_len > 0) {
             comm_pi_parse_line(s_comm_frame_buf);
@@ -116,11 +108,9 @@ static void comm_pi_feed_byte(uint8_t byte)
         s_comm_frame_len = 0;
         return;
     }
-    /* 普通字符 → 追加到行缓冲 */
     if (s_comm_frame_len < (COMM_FRAME_MAX_LEN - 1)) {
         s_comm_frame_buf[s_comm_frame_len++] = (char)byte;
     } else {
-        /* 行溢出 → 丢弃整行 */
         s_comm_frame_len = 0;
     }
 }
@@ -129,7 +119,7 @@ static void comm_pi_feed_byte(uint8_t byte)
  *  对外接口
  * ============================================================ */
 
-uint8_t comm_rx_byte;   /* HAL_UART_Receive_IT 单字节缓冲 */
+uint8_t comm_rx_byte;
 
 void comm_pi_init(void)
 {
@@ -148,36 +138,21 @@ void comm_pi_poll(void)
     }
 }
 
-/* -----------------------------------------------------------
- *  发送请求给树莓派
- * ----------------------------------------------------------- */
-void comm_send_place(char color, uint8_t num, uint8_t row, uint8_t col)
-{
-    char buf[32];
-    int len = snprintf(buf, sizeof(buf), "PLACE,%c,%u,%u,%u\n", color, num, row, col);
-    HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)len, 100);
-}
-
-void comm_send_battle_start(char color)
-{
-    char buf[24];
-    int len = snprintf(buf, sizeof(buf), "BATTLE_START,%c\n", color);
-    HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)len, 100);
-}
-
+/* ---- 发送 ---- */
 void comm_send_ready(void)
 {
     const char *msg = "READY\n";
     HAL_UART_Transmit(&huart1, (uint8_t *)msg, 6, 100);
 }
-void comm_send_new(void)
+
+void comm_send_pick(void)
 {
-    const char *msg = "NEW\n";
-    HAL_UART_Transmit(&huart1, (uint8_t *)msg, 3, 100);
+    const char *msg = "PICK\n";
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, 5, 100);
 }
 
 void comm_send_finish(void)
 {
     const char *msg = "FINISH\n";
-    HAL_UART_Transmit(&huart1, (uint8_t *)msg, 6, 100);
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, 7, 100);
 }

@@ -1812,23 +1812,6 @@ void Move_Pos(int32_t x, int32_t y)
 }
 
 /**
-  * @brief  取子→放子命令：写入取子和放子目标坐标，由 MotorTask 状态机异步执行
-  * @param  pick_x, pick_y   取子位置（yaw/pitch 脉冲数）
-  * @param  place_x, place_y 放子位置（yaw/pitch 脉冲数）
-  * @note   非阻塞——只写入 arm_cmd，立即返回
-  */
-void Arm_Execute_Pick_Place(int32_t pick_x, int32_t pick_y,
-                            int32_t place_x, int32_t place_y)
-{
-    arm_cmd.pick_x   = pick_x;
-    arm_cmd.pick_y   = pick_y;
-    arm_cmd.place_x  = place_x;
-    arm_cmd.place_y  = place_y;
-    /* 最后写入 type，避免 MotorTask 先看到未完整写入的命令。 */
-    arm_cmd.type     = CMD_EXEC;
-}
-
-/**
   * @brief  单电机绝对位置移动
   * @param  addr     ：电机地址（1=Yaw, 2=Pitch）
   * @param  position ：目标位置（带符号脉冲数，绝对模式）

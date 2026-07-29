@@ -121,8 +121,8 @@ static int test_vofa_apply_kv(const char *key, float value) {
         Emm_V5_MMCL_En_Control(1, true, false);
         Emm_V5_MMCL_En_Control(2, true, false);
         Emm_V5_Multi_Motor_Cmd(0);   // 广播触发，两个电机同时开始
-        Emm_V5_Origin_Trigger_Return(1, 0, false);
-        Emm_V5_Origin_Trigger_Return(2, 0, false);
+        Emm_V5_Origin_Set_O(1, true);
+        Emm_V5_Origin_Set_O(2, true);
         Emm_V5_Multi_Motor_Cmd(0);   // 广播触发，两个电机同时开始
         last_pos_pitch = 0;
         last_pos_yaw   = 0;
@@ -194,14 +194,11 @@ static int test_vofa_apply_kv(const char *key, float value) {
         return 1;
     }
     if (test_key_equal(key, "PLACE")) {
-        comm_send_place(s_cmd_color,s_cmd_num, s_cmd_row, s_cmd_col);
-        printsf(0, "PLACE %c,%u,%u,%u", s_cmd_color,s_cmd_num,
-                (unsigned int)s_cmd_row, (unsigned int)s_cmd_col);
+        printsf(0, "PLACE removed");
         return 1;
     }
     if (test_key_equal(key, "BATTLE")) {
-        comm_send_battle_start(s_cmd_color);
-        printsf(0, "BATTLE %c", s_cmd_color);
+        printsf(0, "BATTLE removed");
         return 1;
     }
     if (test_key_equal(key, "READY")) {
