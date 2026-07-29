@@ -74,10 +74,10 @@ static void comm_pi_parse_line(const char *line)
         char *a1 = strtok_r(NULL, ",", &saveptr);
         char *a2 = strtok_r(NULL, ",", &saveptr);
         if (a1 && a2) {
-            comm_angle1 = atoi(a1);
-            comm_angle2 = atoi(a2);
+            comm_angle1 = (float)atof(a1);
+            comm_angle2 = (float)atof(a2);
             comm_task_ready = true;
-            printsf(0, "TASK %d %d", comm_angle1, comm_angle2);
+            printsf(0, "TASK %.3f %.3f", comm_angle1, comm_angle2);
         } else {
             printsf(0, "TASK PARAM");
         }

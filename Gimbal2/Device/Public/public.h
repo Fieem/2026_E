@@ -45,10 +45,10 @@ typedef enum {
 /* ---- 命令结构体 ---- */
 typedef struct {
     ArmCmdType_t type;
-    int32_t      pick_x;        /* 初始位置 电机1 (度) */
-    int32_t      pick_y;        /* 初始位置 电机2 (度) */
-    int32_t      place_x;       /* 放置位置 电机1 (度) */
-    int32_t      place_y;       /* 放置位置 电机2 (度) */
+    float        pick_x;        /* 初始位置 电机1 (度，小数) */
+    float        pick_y;        /* 初始位置 电机2 (度，小数) */
+    float        place_x;       /* 放置位置 电机1 (度，小数) */
+    float        place_y;       /* 放置位置 电机2 (度，小数) */
 } ArmCmd_t;
 
 extern ArmCmd_t   arm_cmd;
@@ -56,7 +56,7 @@ extern ArmState_t arm_state;
 
 /* ---- TASK 协议解析结果（每次 2 个角度值）---- */
 extern bool    comm_task_ready;
-extern int32_t comm_angle1;
-extern int32_t comm_angle2;
+extern float   comm_angle1;
+extern float   comm_angle2;
 
 #endif //INC_2024E_PUBLIC_H

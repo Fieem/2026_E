@@ -66,6 +66,12 @@ void parseLine(const char *line) {
         return;
     }
 
+    if (equalsUpper(cmd, "PICK")) {
+        link_status.state = GIMBAL2_LINK_STATE_PICK;
+        link_status.pick_flag = true;
+        return;
+    }
+
     if (equalsUpper(cmd, "NEW")) {
         link_status.new_flag = true;
         return;
@@ -149,19 +155,18 @@ extern "C" bool Gimbal2Link_GetStatus(Gimbal2LinkStatus *status) {
 extern "C" bool Gimbal2Link_ClearFlags(void) {
     link_status.new_flag = false;
     link_status.ready_flag = false;
+    link_status.pick_flag = false;
     link_status.finish_flag = false;
     link_status.busy_flag = false;
     link_status.error_flag = false;
     return true;
 }
 
-extern "C" bool Gimbal2Link_SendTask(
-    const int32_t p1, const int32_t p2, const int32_t p3, const int32_t p4) {
+extern "C" bool Gimbal2Link_SendTask(const float angle1, const float angle2) {
     char buffer[64];
     const int length = std::snprintf(
-        buffer, sizeof(buffer), "TASK,%ld,%ld,%ld,%ld\n",
-        static_cast<long>(p1), static_cast<long>(p2),
-        static_cast<long>(p3), static_cast<long>(p4));
+        buffer, sizeof(buffer), "TASK,%.3f,%.3f\n",
+        static_cast<double>(angle1), static_cast<double>(angle2));
     if (length <= 0 || length >= static_cast<int>(sizeof(buffer))) return false;
 
     return HAL_UART_Transmit(

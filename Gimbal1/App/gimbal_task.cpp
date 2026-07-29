@@ -4,6 +4,7 @@
 #include "FreeRTOS.h"
 #include "cmsis_os.h"
 #include "fdcan.h"
+#include "gimbal2_link.h"
 #include "queue.h"
 #include "task.h"
 
@@ -26,6 +27,22 @@ bool startup_homing_active = false;
 bool startup_home_command_sent = false;
 uint32_t startup_home_started_tick = 0U;
 uint32_t startup_home_stable_since_tick = 0U;
+
+enum class ExecuteState : uint8_t {
+    Idle = 0,
+    MoveJ1ToPick,
+    WaitJ1Pick,
+    WaitGimbal2Pick,
+    MoveJ1ToPlace,
+    WaitJ1Place,
+    WaitGimbal2Finish,
+};
+
+ExecuteState execute_state = ExecuteState::Idle;
+ScaraVisionResult execute_result{};
+uint8_t execute_piece_index = 0U;
+uint16_t last_completed_sequence = 0U;
+uint32_t execute_stage_started_tick = 0U;
 
 float wrapToTwoPi(float angle_rad) {
     angle_rad = std::fmod(angle_rad, kTwoPi);
@@ -68,6 +85,9 @@ void enterFault() {
     startup_homing_active = false;
     startup_home_command_sent = false;
     startup_home_stable_since_tick = 0U;
+    execute_state = ExecuteState::Idle;
+    execute_piece_index = 0U;
+    execute_stage_started_tick = 0U;
 }
 
 bool enableAtZeroSpeed(uint32_t now_ms) {
@@ -141,6 +161,129 @@ void processCommand(const ScaraJ1Command &command, uint32_t now_ms) {
         break;
 
     default:
+        break;
+    }
+}
+
+float radToDegrees(float angle_rad) {
+    return angle_rad * 180.0f / std::numbers::pi_v<float>;
+}
+
+bool j1AtTarget(float target_rad) {
+    if (!j1_motor.feedbackFresh(HAL_GetTick(), kFeedbackTimeoutMs)) return false;
+    const float measured_joint_angle = motorToJointAngle(j1_motor.angle);
+    return std::fabs(measured_joint_angle - target_rad) <= kExecuteJ1ToleranceRad;
+}
+
+void commandJ1JointAngle(float joint_angle_rad, uint32_t now_ms) {
+    processCommand(
+        ScaraJ1Command{SCARA_J1_COMMAND_SET_ANGLE, joint_angle_rad}, now_ms);
+}
+
+void startExecuteStage(ExecuteState next_state, uint32_t now_ms) {
+    execute_state = next_state;
+    execute_stage_started_tick = now_ms;
+}
+
+void finishSequence(void) {
+    last_completed_sequence = execute_result.sequence;
+    execute_result = ScaraVisionResult{};
+    execute_piece_index = 0U;
+    execute_stage_started_tick = 0U;
+    execute_state = ExecuteState::Idle;
+}
+
+void startExecution(const ScaraVisionResult &result, uint32_t now_ms) {
+    execute_result = result;
+    execute_piece_index = 0U;
+    Gimbal2Link_ClearFlags();
+    startExecuteStage(ExecuteState::MoveJ1ToPick, now_ms);
+}
+
+void updateExecution(uint32_t now_ms) {
+    if (startup_homing_active || j1_state == SCARA_J1_STATE_FAULT) return;
+
+    if (execute_state == ExecuteState::Idle) {
+        if (Vision_GetState() != SCARA_VISION_STATE_READY) return;
+
+        ScaraVisionResult pending{};
+        if (!Vision_GetResult(&pending)) return;
+        if (pending.sequence == 0U || pending.sequence == last_completed_sequence) return;
+
+        startExecution(pending, now_ms);
+    }
+
+    last_host_command_tick = now_ms;
+
+    Gimbal2LinkStatus gimbal2_status{};
+    (void)Gimbal2Link_GetStatus(&gimbal2_status);
+    if (gimbal2_status.error_flag) {
+        enterFault();
+        return;
+    }
+
+    if (execute_piece_index >= execute_result.expected_piece_count ||
+        execute_piece_index >= SCARA_MAX_VISION_PIECES) {
+        finishSequence();
+        return;
+    }
+
+    const ScaraVisionPose &pose = execute_result.poses[execute_piece_index];
+
+    switch (execute_state) {
+    case ExecuteState::Idle:
+        break;
+
+    case ExecuteState::MoveJ1ToPick:
+        Gimbal2Link_ClearFlags();
+        commandJ1JointAngle(pose.pick_j1_rad, now_ms);
+        startExecuteStage(ExecuteState::WaitJ1Pick, now_ms);
+        break;
+
+    case ExecuteState::WaitJ1Pick:
+        if (!j1AtTarget(pose.pick_j1_rad)) break;
+        Gimbal2Link_ClearFlags();
+        if (!Gimbal2Link_SendTask(
+                radToDegrees(pose.pick_j2_rad),
+                radToDegrees(pose.pick_wrist_rad))) {
+            enterFault();
+            return;
+        }
+        startExecuteStage(ExecuteState::WaitGimbal2Pick, now_ms);
+        break;
+
+    case ExecuteState::WaitGimbal2Pick:
+        if (!gimbal2_status.pick_flag) break;
+        Gimbal2Link_ClearFlags();
+        startExecuteStage(ExecuteState::MoveJ1ToPlace, now_ms);
+        break;
+
+    case ExecuteState::MoveJ1ToPlace:
+        commandJ1JointAngle(pose.place_j1_rad, now_ms);
+        startExecuteStage(ExecuteState::WaitJ1Place, now_ms);
+        break;
+
+    case ExecuteState::WaitJ1Place:
+        if (!j1AtTarget(pose.place_j1_rad)) break;
+        Gimbal2Link_ClearFlags();
+        if (!Gimbal2Link_SendTask(
+                radToDegrees(pose.place_j2_rad),
+                radToDegrees(pose.place_wrist_rad))) {
+            enterFault();
+            return;
+        }
+        startExecuteStage(ExecuteState::WaitGimbal2Finish, now_ms);
+        break;
+
+    case ExecuteState::WaitGimbal2Finish:
+        if (!gimbal2_status.finish_flag) break;
+        Gimbal2Link_ClearFlags();
+        ++execute_piece_index;
+        if (execute_piece_index >= execute_result.expected_piece_count) {
+            finishSequence();
+        } else {
+            startExecuteStage(ExecuteState::MoveJ1ToPick, now_ms);
+        }
         break;
     }
 }
@@ -266,14 +409,16 @@ extern "C" void StartGimbalTask(void *argument) {
 
     TickType_t last_wake_tick = xTaskGetTickCount();
     for (;;) {
+        const uint32_t now_ms = HAL_GetTick();
         ScaraJ1Command command{};
         while (xQueueReceive(j1_command_queue, &command, 0U) == pdPASS) {
-            processCommand(command, HAL_GetTick());
+            processCommand(command, now_ms);
         }
 
-        updateStartupHome(HAL_GetTick());
+        updateStartupHome(now_ms);
+        updateExecution(now_ms);
         Vision_Poll();
-        monitorSafety(HAL_GetTick());
+        monitorSafety(now_ms);
         vTaskDelayUntil(&last_wake_tick, pdMS_TO_TICKS(kControlPeriodMs));
     }
 }
