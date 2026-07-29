@@ -1713,12 +1713,12 @@ bool Emm_V5_Is_PosReached(uint8_t addr)
   *         查询两个电机的 S_FLAG Prf_TF 到位标志。
   *         CAN 无应答则静默跳过，下一次循环重试。
   */
-void Is_Arrived(void)
-{
-    if (Emm_V5_Is_PosReached(1) && Emm_V5_Is_PosReached(2)) {
-        arrive_flag = true;
-    }
-}
+// void Is_Arrived(void)
+// {
+//     if (Emm_V5_Is_PosReached(1) && Emm_V5_Is_PosReached(2)) {
+//         arrive_flag = true;
+//     }
+// }
 /**
     * @brief  读取电机PID参数（阻塞等待应答）
     * @param  addr   电机ID

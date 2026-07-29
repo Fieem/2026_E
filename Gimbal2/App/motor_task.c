@@ -94,7 +94,7 @@ void StartMotorTask(void *argument)
             break;
 
         case ARM_DONE:
-            comm_send_new();             /* 通知上位机完成 */
+            comm_send_finish();          /* 通知上位机任务完成 */
             arm_state = ARM_IDLE;
             break;
         }
