@@ -2,4 +2,5 @@
 numpy
 opencv-python
 Pillow
+pyserial
 # Picamera2 由 Raspberry Pi OS 的 python3-picamera2 软件包提供。

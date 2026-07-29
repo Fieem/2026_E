@@ -40,11 +40,17 @@ if solution is not None:
 
 ## 默认约束
 
-- 矩形短边范围：50～90 mm
-- 矩形长边范围：90～120 mm
+- 矩形短边范围：40～100 mm
+- 矩形长边范围：80～130 mm
 - 边匹配容差：3 mm 或边长的 8%，取较大值
 - 矩形未覆盖面积容差：6%
-- 搜索预算：最多检查 5000 个局部布局，防止异常图像导致程序长时间卡住
+- 边长相对容差：5%
+- 局部接缝最小接触比例：60%
+- 相邻碎片重叠容差：4 mm
+- 搜索预算：最多检查 20000 个局部布局，防止异常图像导致程序长时间卡住
+
+求解器会先用多边形包围盒排除明显分离的候选，再执行精确边相交判断；
+碎片边长也会在预处理阶段缓存，减少重复计算。
 
 当前测试包含 30 个精确合成拼图，以及 10 个顶点分别带有 ±1 mm 随机误差
 的拼图。实际摄像头处理流程应为：
@@ -80,6 +86,36 @@ python visual_demo.py --seed 29 --noise 1.0 --output rectangle_demo.png
 完整处理流程为：
 
 `1600×1200 图像 → 四点透视矫正 → 二值分割 → 轮廓提取 → 多边形拟合 → 毫米坐标 → 矩形求解`
+
+## 树莓派—Gimbal1 串口服务
+
+`vision_serial_service.py` 等待 Gimbal1 通过 USART1 发送 `VISION_START`，
+收到后只采集并处理一帧图像。识别成功后，每块碎片发送一个结果帧，结果包含：
+
+```text
+pick_j1_rad, place_j1_rad,
+pick_j2_rad, place_j2_rad,
+pick_wrist_rad, place_wrist_rad
+```
+
+其中腕部角度用于后续舵机/电磁铁方向控制。当前阶段 Gimbal1 只缓存该角度，
+不会驱动尚未接入的 Gimbal2。
+
+树莓派部署依赖：
+
+```bash
+sudo apt install -y python3-serial
+```
+
+启动串口服务：
+
+```bash
+python3 vision_serial_service.py --serial /dev/serial0 --source picamera2
+```
+
+当前 `vision_config.json` 中的 SCARA 连杆长度默认为 `0`，这是安全占位值。
+必须填写 `link1_mm`、`link2_mm`、相机到基座变换、零位和关节限位后，串口服务
+才会发送角度结果；参数未配置时只返回错误码，不会发送运动角度。
 
 ### 1. 安装树莓派依赖
 
@@ -252,5 +288,8 @@ JSON 中的坐标仍然属于相机工作区坐标，不能未经转换就直接
 | `threshold` | `0` 表示使用 Otsu 自动阈值，也可以填写固定灰度阈值 |
 | `morphology_mm` | 开闭运算尺度，用于清理小噪点和小孔洞 |
 | `polygon_epsilon_mm` | 多边形角点拟合容差 |
+| `short_edge_mm` | 小于该长度的边视为伪短边，并用两侧边的延长线求角点 |
+| `collinear_angle_deg` | 相邻边转角小于该值时合并为一条边 |
+| `max_corner_extension_mm` | 短边修复时允许角点延长的最大距离 |
 | `min_piece_area_mm2` | 最小碎片面积，小于该值的轮廓会被忽略 |
 | `max_piece_area_mm2` | 最大碎片面积，大于该值的轮廓会被忽略 |

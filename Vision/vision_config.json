@@ -9,20 +9,20 @@
     "pixels_per_mm": 4.0,
     "image_points": [
       [
-        591,
+        608,
         237
       ],
       [
-        1147,
-        214
+        1159,
+        211
       ],
       [
-        1161,
-        1002
+        1174,
+        998
       ],
       [
-        612,
-        1004
+        631,
+        1001
       ]
     ],
     "target_center_mm": [
@@ -32,11 +32,32 @@
   },
   "segmentation": {
     "mode": "light_on_dark",
-    "threshold": 0,
+    "threshold": 120,
     "blur_size": 5,
     "morphology_mm": 0.8,
     "polygon_epsilon_mm": 1.2,
+    "short_edge_mm": 5.0,
+    "collinear_angle_deg": 8.0,
+    "max_corner_extension_mm": 20.0,
     "min_piece_area_mm2": 150.0,
     "max_piece_area_mm2": 12000.0
+  },
+  "scara": {
+    "link1_mm": 0.0,
+    "link2_mm": 0.0,
+    "camera_to_base": {
+      "rotation_rad": 0.0,
+      "tx_mm": 0.0,
+      "ty_mm": 0.0
+    },
+    "j1_zero_offset_rad": 0.0,
+    "j2_zero_offset_rad": 0.0,
+    "j1_direction": 1,
+    "j2_direction": 1,
+    "j1_min_rad": -2.8,
+    "j1_max_rad": 2.8,
+    "j2_min_rad": -2.8,
+    "j2_max_rad": 2.8,
+    "elbow_branch": 1
   }
 }

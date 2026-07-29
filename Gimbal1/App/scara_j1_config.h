@@ -15,11 +15,14 @@ inline constexpr float kZeroOffsetRad = 0.0f;
 inline constexpr bool kDirectionInverted = false;
 inline constexpr float kMinJointAngleRad = -2.8f;
 inline constexpr float kMaxJointAngleRad = 2.8f;
+inline constexpr float kMinJ2JointAngleRad = -2.8f;
+inline constexpr float kMaxJ2JointAngleRad = 2.8f;
 inline constexpr float kMaxManualSpeedRpm = 100.0f;
 
 inline constexpr uint32_t kControlPeriodMs = 5U;
 inline constexpr uint32_t kFeedbackTimeoutMs = 300U;
 inline constexpr uint32_t kHostWatchdogMs = 1500U;
+inline constexpr uint32_t kVisionTimeoutMs = 5000U;
 
 inline constexpr float kTwoPi = 2.0f * std::numbers::pi_v<float>;
 

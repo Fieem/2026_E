@@ -204,6 +204,7 @@ extern "C" void StartGimbalTask(void *argument) {
             processCommand(command, HAL_GetTick());
         }
 
+        Vision_Poll();
         monitorSafety(HAL_GetTick());
         vTaskDelayUntil(&last_wake_tick, pdMS_TO_TICKS(kControlPeriodMs));
     }

@@ -11,6 +11,8 @@ extern "C" {
 enum {
     SCARA_FRAME_HEADER = 0xA5,
     SCARA_MAX_FLOATS = 8,
+    SCARA_MAX_VISION_PIECES = 4,
+    SCARA_VISION_POSE_FLOATS = 6,
 };
 
 typedef enum {
@@ -56,8 +58,60 @@ typedef struct {
     uint32_t last_feedback_tick_ms;
 } ScaraJ1Status;
 
+typedef enum {
+    SCARA_CMD_VISION_START = 0x0201,
+    SCARA_CMD_VISION_RESULT = 0x0202,
+    SCARA_CMD_VISION_ERROR = 0x0203,
+} ScaraVisionCommandId;
+
+typedef enum {
+    SCARA_VISION_STATE_IDLE = 0,
+    SCARA_VISION_STATE_WAITING,
+    SCARA_VISION_STATE_READY,
+    SCARA_VISION_STATE_ERROR,
+} ScaraVisionState;
+
+typedef enum {
+    SCARA_VISION_ERROR_NONE = 0,
+    SCARA_VISION_ERROR_FRAGMENT_COUNT = 1,
+    SCARA_VISION_ERROR_NO_SOLUTION = 2,
+    SCARA_VISION_ERROR_IK_UNREACHABLE = 3,
+    SCARA_VISION_ERROR_INVALID_CONFIG = 4,
+    SCARA_VISION_ERROR_BUSY = 5,
+    SCARA_VISION_ERROR_INVALID_FRAME = 6,
+    SCARA_VISION_ERROR_TIMEOUT = 7,
+    SCARA_VISION_ERROR_UART = 8,
+} ScaraVisionError;
+
+typedef struct {
+    float pick_j1_rad;
+    float place_j1_rad;
+    float pick_j2_rad;
+    float place_j2_rad;
+    float pick_wrist_rad;
+    float place_wrist_rad;
+} ScaraVisionPose;
+
+typedef struct {
+    ScaraVisionState state;
+    uint16_t sequence;
+    uint8_t expected_piece_count;
+    uint8_t received_mask;
+    ScaraVisionError error;
+    ScaraVisionPose poses[SCARA_MAX_VISION_PIECES];
+} ScaraVisionResult;
+
 bool ScaraJ1_SubmitCommand(ScaraJ1Command command);
 bool ScaraJ1_GetStatus(ScaraJ1Status *status);
+
+// These functions are called from a FreeRTOS task, not an interrupt callback.
+bool Vision_RequestStart(void);
+void Vision_Poll(void);
+void Vision_OnResultFrame(uint16_t flags, const float *data, uint8_t float_num);
+void Vision_OnErrorFrame(uint16_t flags, uint16_t error_code);
+ScaraVisionState Vision_GetState(void);
+ScaraVisionError Vision_GetError(void);
+bool Vision_GetResult(ScaraVisionResult *result);
 
 #ifdef __cplusplus
 }

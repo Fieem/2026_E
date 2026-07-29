@@ -208,20 +208,130 @@ def perspective_transform(frame: np.ndarray, config: Dict) -> Tuple[np.ndarray, 
     return corrected, pixels_per_mm
 
 
-def simplify_contour(
-    contour: np.ndarray, pixels_per_mm: float, base_epsilon_mm: float
+def _line_intersection(
+    first_start: np.ndarray,
+    first_end: np.ndarray,
+    second_start: np.ndarray,
+    second_end: np.ndarray,
 ) -> Optional[np.ndarray]:
-    """将像素轮廓简化为具有 3～5 个真实角点的多边形。"""
+    """求两条无限延长直线的交点，平行或近似平行时返回 None。"""
 
-    perimeter = cv2.arcLength(contour, True)
+    first_direction = first_end - first_start
+    second_direction = second_end - second_start
+    denominator = float(
+        first_direction[0] * second_direction[1]
+        - first_direction[1] * second_direction[0]
+    )
+    scale = max(float(np.linalg.norm(first_direction)), float(np.linalg.norm(second_direction)), 1.0)
+    if abs(denominator) <= 1e-6 * scale * scale:
+        return None
+    offset = second_start - first_start
+    ratio = float(
+        offset[0] * second_direction[1] - offset[1] * second_direction[0]
+    ) / denominator
+    return first_start + ratio * first_direction
+
+
+def _regularize_polygon(
+    points_mm: np.ndarray,
+    short_edge_mm: float,
+    collinear_angle_deg: float,
+    max_corner_extension_mm: float,
+) -> np.ndarray:
+    """删除短边伪顶点，并合并接近共线的相邻边。"""
+
+    points = [np.asarray(point, dtype=np.float64) for point in points_mm]
+    if len(points) < 3:
+        return np.asarray(points, dtype=np.float64)
+
+    # 一条边过短时，用短边两侧的两条边作无限延长线求真正的角点。
+    # 每次只处理最短边，避免一次修改影响后续索引。
+    while len(points) > 3:
+        edge_lengths = [
+            float(np.linalg.norm(points[(index + 1) % len(points)] - points[index]))
+            for index in range(len(points))
+        ]
+        short_index = int(np.argmin(edge_lengths))
+        if edge_lengths[short_index] > short_edge_mm:
+            break
+
+        point_index = short_index
+        next_index = (point_index + 1) % len(points)
+        previous_index = (point_index - 1) % len(points)
+        after_index = (next_index + 1) % len(points)
+        corner = _line_intersection(
+            points[previous_index],
+            points[point_index],
+            points[next_index],
+            points[after_index],
+        )
+        if corner is None:
+            # 两侧几乎平行时没有可靠的延长交点，退化为直接删除短边终点。
+            corner = points[point_index]
+        elif max(
+            float(np.linalg.norm(corner - points[point_index])),
+            float(np.linalg.norm(corner - points[next_index])),
+        ) > max_corner_extension_mm:
+            # 交点太远通常意味着轮廓噪声，避免生成飞出去的伪角点。
+            corner = points[point_index]
+
+        points = [
+            corner if index == point_index else point
+            for index, point in enumerate(points)
+            if index != next_index
+        ]
+
+    # 轮廓方向上的转角接近 0°，说明两段实际上属于同一条边。
+    # 这里的角度是两条相邻边沿轮廓方向的转角，不是多边形内角。
+    while len(points) > 3:
+        removed = False
+        for index in range(len(points)):
+            previous = points[(index - 1) % len(points)]
+            current = points[index]
+            following = points[(index + 1) % len(points)]
+            incoming = current - previous
+            outgoing = following - current
+            incoming_length = float(np.linalg.norm(incoming))
+            outgoing_length = float(np.linalg.norm(outgoing))
+            if incoming_length <= 1e-9 or outgoing_length <= 1e-9:
+                continue
+            dot = float(np.dot(incoming, outgoing))
+            cross = float(incoming[0] * outgoing[1] - incoming[1] * outgoing[0])
+            turn_deg = abs(math.degrees(math.atan2(cross, dot)))
+            if dot > 0.0 and turn_deg <= collinear_angle_deg:
+                points.pop(index)
+                removed = True
+                break
+        if not removed:
+            break
+
+    return np.asarray(points, dtype=np.float64)
+
+
+def simplify_contour(
+    contour: np.ndarray,
+    pixels_per_mm: float,
+    base_epsilon_mm: float,
+    short_edge_mm: float = 2.0,
+    collinear_angle_deg: float = 8.0,
+    max_corner_extension_mm: float = 20.0,
+) -> Optional[np.ndarray]:
+    """将轮廓简化为 3～5 个角点，并修复短边和近共线伪顶点。"""
+
     for epsilon_mm in np.linspace(base_epsilon_mm, 5.0, 15):
         epsilon_px = max(1.0, float(epsilon_mm) * pixels_per_mm)
-        polygon = cv2.approxPolyDP(contour, epsilon_px, True)
-        vertex_count = len(polygon)
-        if 3 <= vertex_count <= 5:
-            return polygon.reshape(-1, 2)
-        if vertex_count < 3:
+        polygon = cv2.approxPolyDP(contour, epsilon_px, True).reshape(-1, 2)
+        if len(polygon) < 3:
             break
+        points_mm = polygon.astype(np.float64) / float(pixels_per_mm)
+        regularized_mm = _regularize_polygon(
+            points_mm,
+            max(0.1, float(short_edge_mm)),
+            max(0.1, float(collinear_angle_deg)),
+            max(0.1, float(max_corner_extension_mm)),
+        )
+        if 3 <= len(regularized_mm) <= 5:
+            return regularized_mm * float(pixels_per_mm)
     return None
 
 
@@ -277,6 +387,11 @@ def detect_pieces(
     minimum_area = float(segmentation["min_piece_area_mm2"])
     maximum_area = float(segmentation["max_piece_area_mm2"])
     epsilon_mm = float(segmentation["polygon_epsilon_mm"])
+    short_edge_mm = float(segmentation.get("short_edge_mm", 2.0))
+    collinear_angle_deg = float(segmentation.get("collinear_angle_deg", 8.0))
+    max_corner_extension_mm = float(
+        segmentation.get("max_corner_extension_mm", 20.0)
+    )
     pieces: List[DetectedPiece] = []
     warnings: List[str] = []
 
@@ -284,7 +399,14 @@ def detect_pieces(
         area_mm2 = cv2.contourArea(contour) / (pixels_per_mm * pixels_per_mm)
         if not minimum_area <= area_mm2 <= maximum_area:
             continue
-        polygon_px = simplify_contour(contour, pixels_per_mm, epsilon_mm)
+        polygon_px = simplify_contour(
+            contour,
+            pixels_per_mm,
+            epsilon_mm,
+            short_edge_mm,
+            collinear_angle_deg,
+            max_corner_extension_mm,
+        )
         if polygon_px is None:
             warnings.append(f"忽略一个无法简化为 3～5 边形的轮廓，面积 {area_mm2:.1f} mm²")
             continue
@@ -441,6 +563,8 @@ def solution_to_json(
                 "target_center_mm": [placement["target_center"].x, placement["target_center"].y],
                 "angle_rad": placement["angle"],
                 "angle_deg": math.degrees(placement["angle"]),
+                "pick_wrist_rad": placement["source_orientation"],
+                "place_wrist_rad": placement["target_orientation"],
                 "target_points_mm": [[point.x, point.y] for point in placement["target_pts"]],
             }
             for placement in solution["placements"]

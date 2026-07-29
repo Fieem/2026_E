@@ -64,8 +64,6 @@ bool decodeFrame(const RawPacket &packet, ReceiveFrame &frame) {
 }
 
 void processFrame(const ReceiveFrame &frame) {
-    (void)frame.flags;
-
     switch (frame.cmd_id) {
     case SCARA_CMD_HEARTBEAT:
         (void)submit(SCARA_J1_COMMAND_HEARTBEAT);
@@ -91,6 +89,16 @@ void processFrame(const ReceiveFrame &frame) {
         break;
     case SCARA_CMD_J1_CLEAR_FAULT:
         (void)submit(SCARA_J1_COMMAND_CLEAR_FAULT);
+        break;
+    case SCARA_CMD_VISION_RESULT:
+        Vision_OnResultFrame(frame.flags, frame.data, frame.float_num);
+        break;
+    case SCARA_CMD_VISION_ERROR:
+        if (frame.float_num >= 1U && std::isfinite(frame.data[0])) {
+            Vision_OnErrorFrame(
+                frame.flags,
+                static_cast<uint16_t>(std::lround(frame.data[0])));
+        }
         break;
     default:
         break;

@@ -230,6 +230,23 @@ def polygons_overlap(
 ) -> bool:
     """检测具有正面积的重叠，同时允许碎片共边或共用顶点。"""
 
+    # 包围盒完全分离时不可能重叠，避免进入逐边相交和点包含判断。
+    first_min_x = min(point.x for point in first)
+    first_max_x = max(point.x for point in first)
+    first_min_y = min(point.y for point in first)
+    first_max_y = max(point.y for point in first)
+    second_min_x = min(point.x for point in second)
+    second_max_x = max(point.x for point in second)
+    second_min_y = min(point.y for point in second)
+    second_max_y = max(point.y for point in second)
+    if (
+        first_max_x < second_min_x - tolerance
+        or second_max_x < first_min_x - tolerance
+        or first_max_y < second_min_y - tolerance
+        or second_max_y < first_min_y - tolerance
+    ):
+        return False
+
     for i, a in enumerate(first):
         b = first[(i + 1) % len(first)]
         for j, c in enumerate(second):
@@ -315,6 +332,13 @@ def minimum_area_rectangle(points: Sequence[Pt]) -> Optional[Dict]:
             "corners": [corner.rotate(angle) for corner in corners_rotated],
         }
     return best
+
+
+def polygon_orientation(points: Sequence[Pt]) -> float:
+    """用最小面积外接矩形的主边估计碎片方向，结果单位为弧度。"""
+
+    rectangle = minimum_area_rectangle(points)
+    return 0.0 if rectangle is None else _angle_wrap(rectangle["angle"])
 
 
 def _edge(points: Sequence[Pt], index: int) -> Tuple[Pt, Pt]:
@@ -428,7 +452,14 @@ def _prepare_pieces(pieces: Sequence[Dict]) -> List[Dict]:
             {
                 "index": index,
                 "source_center": source_center,
+                "source_orientation": polygon_orientation(observed),
                 "local_points": local_points,
+                "edge_lengths": [
+                    local_points[edge_index].dist(
+                        local_points[(edge_index + 1) % len(local_points)]
+                    )
+                    for edge_index in range(len(local_points))
+                ],
                 "area": polygon_area(local_points),
             }
         )
@@ -459,17 +490,19 @@ def find_rectangle_solution(
     target_center: Optional[Pt] = None,
     *,
     edge_tolerance_mm: float = 3.0,
-    edge_relative_tolerance: float = 0.08,
+    edge_relative_tolerance: float = 0.05,
     minimum_edge_contact_mm: float = 5.0,
-    minimum_edge_contact_ratio: float = 0.4,
-    overlap_tolerance_mm: float = 0.5,
+    minimum_edge_contact_ratio: float = 0.6,
+    # 轮廓拟合和边长误差会让相邻碎片出现少量数值穿插，使用毫米级
+    # 几何容差排除这种测量误差，但仍会拒绝明显的面积重叠。
+    overlap_tolerance_mm: float = 4.0,
     rectangle_area_tolerance: float = 0.06,
     size_range_mm: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = (
-        (50.0, 90.0),
-        (90.0, 120.0),
+        (40.0, 100.0),
+        (80.0, 130.0),
     ),
     dimension_tolerance_mm: float = 3.0,
-    max_search_nodes: int = 5_000,
+    max_search_nodes: int = 20_000,
     diagnostics: Optional[Dict] = None,
 ) -> Optional[Dict]:
     """寻找一个互不重叠且组合后能够填满矩形的布局。
@@ -489,7 +522,7 @@ def find_rectangle_solution(
         match_quality = 0.0
         for edge_index in range(len(piece["local_points"])):
             start, end = _edge(piece["local_points"], edge_index)
-            edge_length = start.dist(end)
+            edge_length = piece["edge_lengths"][edge_index]
             best_quality = 0.0
             for other in prepared:
                 if other["index"] == piece["index"]:
@@ -548,11 +581,20 @@ def find_rectangle_solution(
 
     def partial_geometry_valid(candidate_polygons: Iterable[Sequence[Pt]]) -> bool:
         if size_range_mm is None:
-            return True
+            maximum_final_area = float("inf")
+        else:
+            maximum_final_area = (
+                total_piece_area / max(1.0 - rectangle_area_tolerance, EPS)
+            )
         all_points = [point for polygon in candidate_polygons for point in polygon]
         rectangle = minimum_area_rectangle(all_points)
         if rectangle is None:
             return False
+        # 当前外接矩形已经超过最终允许面积时，后续只会继续变大，直接剪枝。
+        if rectangle["area"] > maximum_final_area + EPS:
+            return False
+        if size_range_mm is None:
+            return True
         short_range, long_range = size_range_mm
         maximum_area = (
             (short_range[1] + dimension_tolerance_mm)
@@ -631,7 +673,9 @@ def find_rectangle_solution(
                         moving_start, moving_end = _edge(
                             moving_points, moving_edge_index
                         )
-                        moving_length = moving_start.dist(moving_end)
+                        moving_length = prepared[moving_index]["edge_lengths"][
+                            moving_edge_index
+                        ]
                         allowed_error = max(
                             edge_tolerance_mm,
                             edge_relative_tolerance * max(fixed_length, moving_length),
@@ -786,6 +830,7 @@ def find_rectangle_solution(
     for piece in prepared:
         angle, center = best_solution["poses"][piece["index"]]
         shifted_center = center.add(shift)
+        source_orientation = piece["source_orientation"]
         placements.append(
             {
                 "piece_index": piece["index"],
@@ -793,6 +838,8 @@ def find_rectangle_solution(
                 "target_center": shifted_center,
                 "offset": shifted_center.sub(piece["source_center"]),
                 "angle": _angle_wrap(angle),
+                "source_orientation": source_orientation,
+                "target_orientation": _angle_wrap(source_orientation + angle),
                 "target_pts": [
                     point.add(shift)
                     for point in best_solution["world_polygons"][piece["index"]]
