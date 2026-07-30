@@ -91,6 +91,10 @@ static void comm_pi_parse_line(const char *line)
         char *msg = strtok_r(NULL, ",", &saveptr);
         printsf(0, "BUSY: %s", msg ? msg : "");
     }
+    else if (strcmp_upper(cmd, "WIN") == 0) {
+        comm_win_flag = true;
+        printsf(0, "WIN");
+    }
     /* 未知命令 → 静默忽略 */
 }
 
@@ -142,17 +146,17 @@ void comm_pi_poll(void)
 void comm_send_ready(void)
 {
     const char *msg = "READY\n";
-    HAL_UART_Transmit(&huart1, (uint8_t *)msg, 5, 100);
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
 }
 
 void comm_send_pick(void)
 {
     const char *msg = "PICK\n";
-    HAL_UART_Transmit(&huart1, (uint8_t *)msg, 4, 100);
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
 }
 
 void comm_send_finish(void)
 {
     const char *msg = "FINISH\n";
-    HAL_UART_Transmit(&huart1, (uint8_t *)msg, 6, 100);
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
 }

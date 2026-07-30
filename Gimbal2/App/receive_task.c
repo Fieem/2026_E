@@ -35,6 +35,14 @@ void StartReceiveTask(void *argument)
                 arm_cmd.type    = CMD_PLACE;
             }
         }
+
+        if (comm_win_flag) {
+            comm_win_flag = false;
+            for (int i = 0; i < 20; i++) {
+                HAL_GPIO_TogglePin(GPIOF, GPIO_PIN_9);
+                osDelay(100);
+            }
+        }
     }
 }
 
@@ -45,6 +53,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1)
     {
+        HAL_GPIO_TogglePin(GPIOF, GPIO_PIN_9);  // 加这行
         comm_pi_ring_push(comm_rx_byte);
         HAL_UART_Receive_IT(&huart1, &comm_rx_byte, 1);
     }
