@@ -52,31 +52,30 @@ void StartMotorTask(void *argument)
 
         case ARM_MAGNET_PICK_ON:
             osDelay(MAGNET_DELAY_MS);
+            SG90_SetAngle(High_Angle);          /* 先抬起舵机 */
+            osDelay(SERVO_DELAY_MS);            /* 等待舵机到位 */
             arm_state = ARM_WAIT_PLACE;
-            comm_send_pick();
+            comm_send_pick();                   /* 舵机已抬起，通知上位机抓取完成 */
             break;
 
         /* ---- 等上位机发第二段 TASK ---- */
         case ARM_WAIT_PLACE:
             if (arm_cmd.type == CMD_PLACE) {
                 arm_cmd.type = CMD_NONE;
-                arm_state = ARM_SERVO_PICK_UP;
-                SG90_SetAngle(High_Angle);
+                arm_state = ARM_MOVING_TO_PLACE;
+                Rotate(1, (float)arm_cmd.place_x);
+                Rotate(2, (float)arm_cmd.place_y);
             }
             break;
 
-        case ARM_SERVO_PICK_UP:
-            osDelay(SERVO_DELAY_MS);
+        case ARM_SERVO_PICK_UP:                 /* 不再使用，保留以防枚举索引错位 */
             arm_state = ARM_MOVING_TO_PLACE;
-
-            Rotate(1, (float)arm_cmd.place_x);
-            Rotate(2, (float)arm_cmd.place_y);
             break;
 
         case ARM_MOVING_TO_PLACE:
             osDelay(MOTOR_DELAY_MS);
             arm_state = ARM_SERVO_PLACE_DOWN;
-            SG90_SetAngle(Low_Angle);
+            SG90_SetAngle(100);  //不要下去那么多，直接抛下去
             break;
 
         case ARM_SERVO_PLACE_DOWN:
