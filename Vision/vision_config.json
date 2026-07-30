@@ -47,8 +47,8 @@
     "overlap_tolerance_mm": 1.5,
     "placement_spread_mm": 0.0,
     "local_overlap_avoidance": true,
-    "local_overlap_clearance_mm": 7.0,
-    "local_overlap_step_mm": 3.5,
+    "local_overlap_clearance_mm": 4.0,
+    "local_overlap_step_mm": 2.0,
     "local_overlap_max_iterations": 8
   },
   "texture": {
@@ -75,6 +75,12 @@
     "j1_max_rad": 3.1416,
     "j2_min_rad": -3.1416,
     "j2_max_rad": 3.1416,
+    "j1_abs_compensation_enabled": true,
+    "j1_abs_compensation_max_deg": 2.5,
+    "j1_abs_compensation_j2_range_deg": 70.0,
+    "j2_sag_compensation_enabled": true,
+    "j2_sag_compensation_range_deg": 70.0,
+    "j2_sag_compensation_max_deg": 3.0,
     "wrist_zero_offset_rad": 0,
     "wrist_direction": 1,
     "pick_wrist_joint_rad": 0.0,

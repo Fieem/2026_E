@@ -47,6 +47,55 @@ PREVIEW_WINDOW_NAME = "Vision Serial Preview"
 RESULT_WINDOW_NAME = "Vision Serial Result"
 
 
+def apply_j1_abs_compensation_rad(
+    j1_rad: float, j2_rad: float, parameters: ScaraParameters, config: dict
+) -> float:
+    """当 |J2| 较小时，在树莓派端对 J1 绝对值直接加角度补偿。"""
+
+    scara = config.get("scara", {})
+    if not bool(scara.get("j1_abs_compensation_enabled", True)):
+        return j1_rad
+
+    max_deg = float(scara.get("j1_abs_compensation_max_deg", 2.0))
+    range_deg = float(scara.get("j1_abs_compensation_j2_range_deg", 35.0))
+    if max_deg <= 1e-6 or range_deg <= 1e-6:
+        return j1_rad
+
+    j2_abs_deg = abs(math.degrees(j2_rad))
+    if j2_abs_deg >= range_deg:
+        return j1_rad
+
+    ratio = 1.0 - j2_abs_deg / range_deg
+    offset_rad = math.radians(max_deg * ratio)
+    compensated = math.copysign(abs(j1_rad) + offset_rad, j1_rad)
+    if compensated < parameters.j1_min_rad or compensated > parameters.j1_max_rad:
+        raise KinematicsError(f"J1 补偿后超出限位：{compensated:.4f} rad")
+    return compensated
+
+
+def apply_j2_sag_compensation_rad(j2_rad: float, config: dict) -> float:
+    """在树莓派端对 J2 小角度下垂做补偿。"""
+
+    scara = config.get("scara", {})
+    if not bool(scara.get("j2_sag_compensation_enabled", True)):
+        return j2_rad
+
+    range_deg = float(scara.get("j2_sag_compensation_range_deg", 35.0))
+    max_deg = float(scara.get("j2_sag_compensation_max_deg", 2.5))
+    if range_deg <= 1e-6 or max_deg <= 1e-6:
+        return j2_rad
+
+    j2_deg = math.degrees(j2_rad)
+    abs_deg = abs(j2_deg)
+    if abs_deg >= range_deg:
+        return j2_rad
+
+    ratio = 1.0 - abs_deg / range_deg
+    offset_deg = max_deg * ratio
+    compensated_abs_deg = max(0.0, abs_deg - offset_deg)
+    return math.radians(math.copysign(compensated_abs_deg, j2_deg))
+
+
 def show_preview(frame, config: dict, debug_view: bool) -> None:
     """在串口服务运行时显示实时预览或调试画面。"""
 
@@ -70,8 +119,12 @@ def print_result_frame_debug(result: dict, responses: List[bytes], sequence: int
         piece_index = int(placement["piece_index"])
         pick_j1 = float(placement["pick_j1_rad"])
         place_j1 = float(placement["place_j1_rad"])
+        pick_j1_raw = float(placement.get("pick_j1_raw_rad", pick_j1))
+        place_j1_raw = float(placement.get("place_j1_raw_rad", place_j1))
         pick_j2 = float(placement["pick_j2_rad"])
         place_j2 = float(placement["place_j2_rad"])
+        pick_j2_raw = float(placement.get("pick_j2_raw_rad", pick_j2))
+        place_j2_raw = float(placement.get("place_j2_raw_rad", place_j2))
         pick_wrist = float(placement["pick_wrist_rad"])
         place_wrist = float(placement["place_wrist_rad"])
         pick_wrist_abs_cam = float(placement.get("pick_wrist_abs_rad", pick_wrist))
@@ -81,8 +134,10 @@ def print_result_frame_debug(result: dict, responses: List[bytes], sequence: int
         pick_tool_abs_base = float(placement.get("pick_tool_abs_base_rad", pick_wrist))
         print(
             f"  帧 {piece_index}: piece={piece_index}, bytes={len(response)}, "
-            f"pick_j1={pick_j1:.4f}, place_j1={place_j1:.4f}, "
-            f"pick_j2={pick_j2:.4f}, place_j2={place_j2:.4f}, "
+            f"pick_j1={pick_j1:.4f} (raw {pick_j1_raw:.4f}), "
+            f"place_j1={place_j1:.4f} (raw {place_j1_raw:.4f}), "
+            f"pick_j2={pick_j2:.4f} (raw {pick_j2_raw:.4f}), "
+            f"place_j2={place_j2:.4f} (raw {place_j2_raw:.4f}), "
             f"pick_wrist={pick_wrist:.4f}, place_wrist={place_wrist:.4f}, "
             f"pick_abs_cam={pick_wrist_abs_cam:.4f}, place_abs_cam={place_wrist_abs_cam:.4f}, "
             f"pick_abs_base={pick_wrist_abs_base:.4f}, place_abs_base={place_wrist_abs_base:.4f}, "
@@ -90,7 +145,9 @@ def print_result_frame_debug(result: dict, responses: List[bytes], sequence: int
         )
 
 
-def make_result_frames(result: dict, sequence: int, parameters: ScaraParameters) -> List[bytes]:
+def make_result_frames(
+    result: dict, sequence: int, parameters: ScaraParameters, config: dict
+) -> List[bytes]:
     """把视觉 placements 转换成每块一帧的六浮点动作包。"""
 
     solution = result.get("solution")
@@ -104,12 +161,20 @@ def make_result_frames(result: dict, sequence: int, parameters: ScaraParameters)
     for piece_index, placement in enumerate(placements):
         pick_center = placement["source_center_mm"]
         place_center = placement["target_center_mm"]
-        pick_j1, pick_j2 = parameters.solve(float(pick_center[0]), float(pick_center[1]))
-        place_j1, place_j2 = parameters.solve(float(place_center[0]), float(place_center[1]))
+        pick_j1_raw, pick_j2_raw = parameters.solve(float(pick_center[0]), float(pick_center[1]))
+        place_j1_raw, place_j2_raw = parameters.solve(float(place_center[0]), float(place_center[1]))
+        pick_j1 = apply_j1_abs_compensation_rad(pick_j1_raw, pick_j2_raw, parameters, config)
+        place_j1 = apply_j1_abs_compensation_rad(place_j1_raw, place_j2_raw, parameters, config)
+        pick_j2 = apply_j2_sag_compensation_rad(pick_j2_raw, config)
+        place_j2 = apply_j2_sag_compensation_rad(place_j2_raw, config)
         placement["pick_j1_rad"] = pick_j1
         placement["place_j1_rad"] = place_j1
+        placement["pick_j1_raw_rad"] = pick_j1_raw
+        placement["place_j1_raw_rad"] = place_j1_raw
         placement["pick_j2_rad"] = pick_j2
         placement["place_j2_rad"] = place_j2
+        placement["pick_j2_raw_rad"] = pick_j2_raw
+        placement["place_j2_raw_rad"] = place_j2_raw
         pick_absolute_orientation = float(placement["pick_wrist_rad"])
         place_absolute_orientation = float(placement["place_wrist_rad"])
         pick_absolute_orientation_base = parameters.orientation_camera_to_base(
@@ -224,7 +289,9 @@ def run_service(
                                 responses = []
                                 print(f"任务 {sequence} 失败：{result['message']}")
                             else:
-                                responses = make_result_frames(result, sequence, parameters)
+                                responses = make_result_frames(
+                                    result, sequence, parameters, config
+                                )
                                 if RESULT_FRAME_LIMIT > 0:
                                     responses = responses[:RESULT_FRAME_LIMIT]
                                 print(f"任务 {sequence} 成功，缓存 {len(responses)} 个碎片结果帧")
