@@ -64,10 +64,11 @@ bool validJointAngle(float value, float minimum, float maximum) {
 bool validPose(const float *data) {
     // 数据顺序：拾取 J1、放置 J1、拾取 J2、放置 J2、拾取腕部角、放置腕部角。
     return validJointAngle(data[0], kMinJointAngleRad, kMaxJointAngleRad) &&
-           validJointAngle(data[2], kMinJointAngleRad, kMaxJointAngleRad) &&
-           validJointAngle(data[1], kMinJ2JointAngleRad, kMaxJ2JointAngleRad) &&
+           validJointAngle(data[1], kMinJointAngleRad, kMaxJointAngleRad) &&
+           validJointAngle(data[2], kMinJ2JointAngleRad, kMaxJ2JointAngleRad) &&
            validJointAngle(data[3], kMinJ2JointAngleRad, kMaxJ2JointAngleRad) &&
-           std::isfinite(data[4]) && std::isfinite(data[5]);
+           std::isfinite(data[4]) &&
+           std::isfinite(data[5]);
 }
 
 void setError(ScaraVisionError error) {

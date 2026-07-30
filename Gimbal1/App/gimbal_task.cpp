@@ -43,6 +43,7 @@ ScaraVisionResult execute_result{};
 uint8_t execute_piece_index = 0U;
 uint16_t last_completed_sequence = 0U;
 uint32_t execute_stage_started_tick = 0U;
+uint32_t vision_start_min_execute_tick = 0U;
 
 float wrapToTwoPi(float angle_rad) {
     angle_rad = std::fmod(angle_rad, kTwoPi);
@@ -188,6 +189,7 @@ void finishSequence(void) {
     execute_result = ScaraVisionResult{};
     execute_piece_index = 0U;
     execute_stage_started_tick = 0U;
+    vision_start_min_execute_tick = 0U;
     execute_state = ExecuteState::Idle;
 }
 
@@ -214,7 +216,9 @@ void updateVisionStartTrigger(uint32_t now_ms) {
     if (!gimbal2_status.ready_flag) return;
     if (Vision_GetState() == SCARA_VISION_STATE_WAITING) return;
 
-    (void)Vision_RequestStart();
+    if (Vision_RequestStart()) {
+        vision_start_min_execute_tick = now_ms + kVisionStartMinExecuteDelayMs;
+    }
     Gimbal2Link_ClearFlags();
     last_host_command_tick = now_ms;
 }
@@ -224,11 +228,16 @@ void updateExecution(uint32_t now_ms) {
 
     if (execute_state == ExecuteState::Idle) {
         if (Vision_GetState() != SCARA_VISION_STATE_READY) return;
+        if (vision_start_min_execute_tick != 0U &&
+            static_cast<int32_t>(now_ms - vision_start_min_execute_tick) < 0) {
+            return;
+        }
 
         ScaraVisionResult pending{};
         if (!Vision_GetResult(&pending)) return;
         if (pending.sequence == 0U || pending.sequence == last_completed_sequence) return;
 
+        vision_start_min_execute_tick = 0U;
         startExecution(pending, now_ms);
     }
 
