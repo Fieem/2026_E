@@ -3,6 +3,7 @@
 //
 
 #include "sg90.h"
+#include <math.h>
 
 /**********************************************************
 ***	SG90 舵机驱动
@@ -52,7 +53,8 @@ uint8_t CalcPickAngle(float angle)
     if (abs_angle <= COMP_ANGLE_MIN) return COMP_LOW_MIN;
     if (abs_angle >= COMP_ANGLE_MAX) return COMP_LOW_MAX;
     float ratio = (abs_angle - COMP_ANGLE_MIN) / (float)(COMP_ANGLE_MAX - COMP_ANGLE_MIN);
-    return (uint8_t)(COMP_LOW_MIN + ratio * (COMP_LOW_MAX - COMP_LOW_MIN) + 0.5f);
+    float curved = powf(ratio, COMP_CURVE_EXP);
+    return (uint8_t)(COMP_LOW_MIN + curved * (COMP_LOW_MAX - COMP_LOW_MIN) + 0.5f);
 }
 /**********************************************************
   ***   电磁铁驱动
