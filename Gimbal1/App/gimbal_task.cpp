@@ -248,12 +248,6 @@ void updateExecution(uint32_t now_ms) {
 
     case ExecuteState::MoveJ1ToPick:
         Gimbal2Link_ClearFlags();
-        commandJ1JointAngle(pose.pick_j1_rad, now_ms);
-        startExecuteStage(ExecuteState::WaitJ1Pick, now_ms);
-        break;
-
-    case ExecuteState::WaitJ1Pick:
-        if (!j1AtTarget(pose.pick_j1_rad)) break;
         Gimbal2Link_ClearFlags();
         if (!Gimbal2Link_SendTask(
                 radToDegrees(pose.pick_j2_rad),
@@ -261,6 +255,11 @@ void updateExecution(uint32_t now_ms) {
             enterFault();
             return;
         }
+        commandJ1JointAngle(pose.pick_j1_rad, now_ms);
+        startExecuteStage(ExecuteState::WaitGimbal2Pick, now_ms);
+        break;
+
+    case ExecuteState::WaitJ1Pick:
         startExecuteStage(ExecuteState::WaitGimbal2Pick, now_ms);
         break;
 
@@ -271,12 +270,6 @@ void updateExecution(uint32_t now_ms) {
         break;
 
     case ExecuteState::MoveJ1ToPlace:
-        commandJ1JointAngle(pose.place_j1_rad, now_ms);
-        startExecuteStage(ExecuteState::WaitJ1Place, now_ms);
-        break;
-
-    case ExecuteState::WaitJ1Place:
-        if (!j1AtTarget(pose.place_j1_rad)) break;
         Gimbal2Link_ClearFlags();
         if (!Gimbal2Link_SendTask(
                 radToDegrees(pose.place_j2_rad),
@@ -284,6 +277,11 @@ void updateExecution(uint32_t now_ms) {
             enterFault();
             return;
         }
+        commandJ1JointAngle(pose.place_j1_rad, now_ms);
+        startExecuteStage(ExecuteState::WaitGimbal2Finish, now_ms);
+        break;
+
+    case ExecuteState::WaitJ1Place:
         startExecuteStage(ExecuteState::WaitGimbal2Finish, now_ms);
         break;
 

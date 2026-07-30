@@ -95,11 +95,7 @@ void processFrame(const ReceiveFrame &frame) {
         Vision_OnResultFrame(frame.flags, frame.data, frame.float_num);
         break;
     case SCARA_CMD_VISION_ERROR:
-        if (frame.float_num >= 1U && std::isfinite(frame.data[0])) {
-            Vision_OnErrorFrame(
-                frame.flags,
-                static_cast<uint16_t>(std::lround(frame.data[0])));
-        }
+        // 当前联调阶段先忽略树莓派返回的 ERROR 帧，只关注 RESULT 是否能稳定收齐。
         break;
     default:
         break;

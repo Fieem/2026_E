@@ -12,10 +12,10 @@ inline constexpr uint8_t kMotorNodeId = 0x01;
 // Calibrate these values after the arm, reducer and hard stops are installed.
 inline constexpr float kZeroOffsetRad = 0.0f;
 inline constexpr bool kDirectionInverted = false;
-inline constexpr float kMinJointAngleRad = -2.8f;
-inline constexpr float kMaxJointAngleRad = 2.8f;
-inline constexpr float kMinJ2JointAngleRad = -2.8f;
-inline constexpr float kMaxJ2JointAngleRad = 2.8f;
+inline constexpr float kMinJointAngleRad = -3.1416f;
+inline constexpr float kMaxJointAngleRad = 3.1416f;
+inline constexpr float kMinJ2JointAngleRad = -3.1416f;
+inline constexpr float kMaxJ2JointAngleRad = 3.1416f;
 inline constexpr float kMaxManualSpeedRpm = 100.0f;
 
 // Power-on homing drives J1 to the configured joint zero before normal control.

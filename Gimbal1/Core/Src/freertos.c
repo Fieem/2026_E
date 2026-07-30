@@ -63,7 +63,7 @@ const osThreadAttr_t defaultTask_attributes = {
 };
 /* Definitions for ReceiveTask */
 osThreadId_t ReceiveTaskHandle;
-uint32_t myTask03Buffer[ 256 ];
+uint32_t myTask03Buffer[ 512 ];
 osStaticThreadDef_t myTask03ControlBlock;
 const osThreadAttr_t ReceiveTask_attributes = {
   .name = "ReceiveTask",
@@ -75,7 +75,7 @@ const osThreadAttr_t ReceiveTask_attributes = {
 };
 /* Definitions for GimbalTask */
 osThreadId_t GimbalTaskHandle;
-uint32_t myTask04Buffer[ 256 ];
+uint32_t myTask04Buffer[ 512 ];
 osStaticThreadDef_t myTask04ControlBlock;
 const osThreadAttr_t GimbalTask_attributes = {
   .name = "GimbalTask",

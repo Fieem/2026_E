@@ -27,7 +27,7 @@
     ],
     "target_center_mm": [
       105.0,
-      148.5
+      222.75
     ]
   },
   "segmentation": {
@@ -47,17 +47,17 @@
     "link2_mm": 150.0,
     "camera_to_base": {
       "rotation_rad": -1.5708,
-      "tx_mm": 268.5,
-      "ty_mm": 120.0
+      "tx_mm": -120.0,
+      "ty_mm": 268.5
     },
     "j1_zero_offset_rad": 0.0,
     "j2_zero_offset_rad": 0.0,
-    "j1_direction": 1,
+    "j1_direction": -1,
     "j2_direction": 1,
-    "j1_min_rad": -2.8,
-    "j1_max_rad": 2.8,
-    "j2_min_rad": -2.8,
-    "j2_max_rad": 2.8,
+    "j1_min_rad": -3.1416,
+    "j1_max_rad": 3.1416,
+    "j2_min_rad": -3.1416,
+    "j2_max_rad": 3.1416,
     "elbow_branch": 1
   }
 }

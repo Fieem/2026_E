@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import time
 import sys
 from pathlib import Path
 from typing import List
@@ -29,6 +30,31 @@ from serial_protocol import (
     pack_result,
 )
 
+RESULT_FRAME_GAP_S = 0.005
+RESULT_FRAME_LIMIT = 1
+
+
+def print_result_frame_debug(result: dict, responses: List[bytes], sequence: int) -> None:
+    """把即将发送的每个结果帧详细打印到终端。"""
+
+    solution = result.get("solution") or {}
+    placements = sorted(solution.get("placements", []), key=lambda item: item["piece_index"])
+    print(f"任务 {sequence} 共发送 {len(responses)} 帧 RESULT：")
+    for placement, response in zip(placements, responses):
+        piece_index = int(placement["piece_index"])
+        pick_j1 = float(placement["pick_j1_rad"])
+        place_j1 = float(placement["place_j1_rad"])
+        pick_j2 = float(placement["pick_j2_rad"])
+        place_j2 = float(placement["place_j2_rad"])
+        pick_wrist = float(placement["pick_wrist_rad"])
+        place_wrist = float(placement["place_wrist_rad"])
+        print(
+            f"  帧 {piece_index}: piece={piece_index}, bytes={len(response)}, "
+            f"pick_j1={pick_j1:.4f}, place_j1={place_j1:.4f}, "
+            f"pick_j2={pick_j2:.4f}, place_j2={place_j2:.4f}, "
+            f"pick_wrist={pick_wrist:.4f}, place_wrist={place_wrist:.4f}"
+        )
+
 
 def make_result_frames(result: dict, sequence: int, parameters: ScaraParameters) -> List[bytes]:
     """把视觉 placements 转换成每块一帧的六浮点动作包。"""
@@ -46,6 +72,10 @@ def make_result_frames(result: dict, sequence: int, parameters: ScaraParameters)
         place_center = placement["target_center_mm"]
         pick_j1, pick_j2 = parameters.solve(float(pick_center[0]), float(pick_center[1]))
         place_j1, place_j2 = parameters.solve(float(place_center[0]), float(place_center[1]))
+        placement["pick_j1_rad"] = pick_j1
+        placement["place_j1_rad"] = place_j1
+        placement["pick_j2_rad"] = pick_j2
+        placement["place_j2_rad"] = place_j2
         pick_wrist = float(placement["pick_wrist_rad"])
         place_wrist = float(placement["place_wrist_rad"])
         values = (pick_j1, place_j1, pick_j2, place_j2, pick_wrist, place_wrist)
@@ -119,19 +149,24 @@ def run_service(
                         image = camera.read()
                         result, _ = process_frame(image, config, output_dir)
                         if result.get("status") != "ok":
-                            responses = [pack_error(sequence, error_code_for_result(result))]
+                            responses = []
                             print(f"任务 {sequence} 失败：{result['message']}")
                         else:
                             responses = make_result_frames(result, sequence, parameters)
+                            if RESULT_FRAME_LIMIT > 0:
+                                responses = responses[:RESULT_FRAME_LIMIT]
                             print(f"任务 {sequence} 成功，发送 {len(responses)} 个碎片结果帧")
+                            print_result_frame_debug(result, responses, sequence)
                     except KinematicsError as error:
-                        responses = [pack_error(sequence, ERROR_IK_UNREACHABLE)]
+                        responses = []
                         print(f"任务 {sequence} 逆运动学失败：{error}")
                     except (KeyError, ValueError, TypeError) as error:
-                        responses = [pack_error(sequence, ERROR_INVALID_CONFIG)]
+                        responses = []
                         print(f"任务 {sequence} 配置或结果错误：{error}")
-                    for response in responses:
+                    for index, response in enumerate(responses):
                         port.write(response)
+                        if index + 1 < len(responses):
+                            time.sleep(RESULT_FRAME_GAP_S)
                     port.flush()
                     last_sequence = sequence
                     last_response = responses
@@ -146,7 +181,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("vision_config.json"))
     parser.add_argument("--serial", default="/dev/serial0", help="树莓派串口设备")
-    parser.add_argument("--baudrate", type=int, default=921600)
+    parser.add_argument("--baudrate", type=int, default=115200)
     parser.add_argument("--source", choices=("auto", "picamera2", "usb"), default="picamera2")
     parser.add_argument("--device", type=int, default=0, help="USB 摄像头编号")
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).with_name("output"))

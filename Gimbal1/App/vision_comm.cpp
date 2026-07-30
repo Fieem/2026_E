@@ -17,6 +17,7 @@ constexpr uint16_t kSequenceMask = 0x0FFFU;
 constexpr uint16_t kCountMask = 0x3U;
 constexpr uint16_t kIndexMask = 0x3U;
 constexpr uint8_t kFrameLengthWithoutData = 4U;
+constexpr bool kDebugSingleFrameReady = true;
 
 ScaraVisionState vision_state = SCARA_VISION_STATE_IDLE;
 ScaraVisionError vision_error = SCARA_VISION_ERROR_NONE;
@@ -125,6 +126,14 @@ extern "C" void Vision_OnResultFrame(
         sizeof(ScaraVisionPose));
     vision_result.received_mask = static_cast<uint8_t>(
         vision_result.received_mask | (1U << piece_index));
+
+    if (kDebugSingleFrameReady) {
+        vision_result.expected_piece_count = 1U;
+        vision_result.received_mask = 0x01U;
+        vision_state = SCARA_VISION_STATE_READY;
+        vision_result.state = SCARA_VISION_STATE_READY;
+        return;
+    }
 
     const uint8_t expected_mask = static_cast<uint8_t>((1U << piece_count) - 1U);
     if (vision_result.received_mask == expected_mask) {
