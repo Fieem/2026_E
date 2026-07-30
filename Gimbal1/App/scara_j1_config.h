@@ -28,7 +28,7 @@ inline constexpr uint32_t kStartupHomeTimeoutMs = 4000U;
 inline constexpr uint32_t kControlPeriodMs = 5U;
 inline constexpr uint32_t kFeedbackTimeoutMs = 300U;
 inline constexpr uint32_t kHostWatchdogMs = 1500U;
-inline constexpr uint32_t kVisionTimeoutMs = 20000U;
+inline constexpr uint32_t kVisionTimeoutMs = 30000U;
 inline constexpr float kExecuteJ1ToleranceRad = 0.03f;
 
 inline constexpr float kTwoPi = 2.0f * std::numbers::pi_v<float>;

@@ -22,6 +22,7 @@ import cv2
 import numpy as np
 
 from algorithm import Pt, find_rectangle_solution, polygon_area
+from texture_scorer import TextureScorer
 
 
 DEFAULT_WIDTH = 1600
@@ -41,6 +42,8 @@ class DetectedPiece:
     contour_px: np.ndarray
     points_mm: List[Pt]
     area_mm2: float
+    piece_image: Optional[np.ndarray] = None
+    polygon_in_image: Optional[List[Pt]] = None
 
 
 def load_config(path: Path) -> Dict:
@@ -57,6 +60,23 @@ def load_config(path: Path) -> Dict:
         raise ValueError("workspace.image_points 必须包含四个标定点")
     if workspace["pixels_per_mm"] <= 0:
         raise ValueError("workspace.pixels_per_mm 必须大于零")
+    if float(workspace.get("rectify_margin_mm", 10.0)) < 0.0:
+        raise ValueError("workspace.rectify_margin_mm 不能小于零")
+    if float(config.get("solver", {}).get("overlap_tolerance_mm", 2.5)) < 0.0:
+        raise ValueError("solver.overlap_tolerance_mm 不能小于零")
+    if float(config.get("solver", {}).get("placement_spread_mm", 0.0)) < 0.0:
+        raise ValueError("solver.placement_spread_mm 不能小于零")
+    if float(config.get("solver", {}).get("local_overlap_clearance_mm", 2.0)) < 0.0:
+        raise ValueError("solver.local_overlap_clearance_mm 不能小于零")
+    if float(config.get("solver", {}).get("local_overlap_step_mm", 1.5)) <= 0.0:
+        raise ValueError("solver.local_overlap_step_mm 必须大于零")
+    if int(config.get("solver", {}).get("local_overlap_max_iterations", 8)) < 0:
+        raise ValueError("solver.local_overlap_max_iterations 不能小于零")
+    texture = config.get("texture", {})
+    if float(texture.get("strip_width_mm", 5.0)) <= 0.0:
+        raise ValueError("texture.strip_width_mm 必须大于零")
+    if float(texture.get("lambda_texture", 0.5)) < 0.0:
+        raise ValueError("texture.lambda_texture 不能小于零")
     return config
 
 
@@ -186,20 +206,35 @@ def calibration_mode(frame: np.ndarray, config: Dict, config_path: Path) -> bool
             return True
 
 
+def get_rectify_margin_mm(config: Dict) -> float:
+    """返回透视矫正留边，单位 mm。"""
+
+    return max(0.0, float(config["workspace"].get("rectify_margin_mm", 10.0)))
+
+
+def get_rectify_margin_px(config: Dict, pixels_per_mm: float) -> int:
+    """返回透视矫正留边，单位 px。"""
+
+    return round(get_rectify_margin_mm(config) * pixels_per_mm)
+
+
 def perspective_transform(frame: np.ndarray, config: Dict) -> Tuple[np.ndarray, float]:
     """将摄像头画面矫正到俯视毫米平面。"""
 
     workspace = config["workspace"]
     pixels_per_mm = float(workspace["pixels_per_mm"])
-    output_width = round(workspace["width_mm"] * pixels_per_mm)
-    output_height = round(workspace["height_mm"] * pixels_per_mm)
+    margin_px = get_rectify_margin_px(config, pixels_per_mm)
+    workspace_width_px = round(workspace["width_mm"] * pixels_per_mm)
+    workspace_height_px = round(workspace["height_mm"] * pixels_per_mm)
+    output_width = workspace_width_px + margin_px * 2
+    output_height = workspace_height_px + margin_px * 2
     source_points = np.array(workspace["image_points"], dtype=np.float32)
     target_points = np.array(
         [
-            [0, 0],
-            [output_width - 1, 0],
-            [output_width - 1, output_height - 1],
-            [0, output_height - 1],
+            [margin_px, margin_px],
+            [margin_px + workspace_width_px - 1, margin_px],
+            [margin_px + workspace_width_px - 1, margin_px + workspace_height_px - 1],
+            [margin_px, margin_px + workspace_height_px - 1],
         ],
         dtype=np.float32,
     )
@@ -375,12 +410,46 @@ def segment_image(
     return gray, mask
 
 
+def restrict_mask_to_piece_search_area(
+    mask: np.ndarray, config: Dict, pixels_per_mm: float
+) -> np.ndarray:
+    """只保留 A4 上半部分作为碎片搜索区域。"""
+
+    restricted = mask.copy()
+    margin_px = get_rectify_margin_px(config, pixels_per_mm)
+    workspace_height_px = round(float(config["workspace"]["height_mm"]) * pixels_per_mm)
+    split_y = margin_px + workspace_height_px // 2
+    restricted[split_y:, :] = 0
+    return restricted
+
+
+def extract_piece_texture(
+    corrected: np.ndarray,
+    polygon_px: np.ndarray,
+) -> Tuple[np.ndarray, List[Pt]]:
+    """从透视矫正图中裁出单块碎片的小图和其局部轮廓。"""
+
+    polygon = polygon_px.astype(np.int32)
+    x, y, width, height = cv2.boundingRect(polygon)
+    crop = corrected[y:y + height, x:x + width].copy()
+    relative_polygon = polygon - np.array([[x, y]], dtype=np.int32)
+    mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillPoly(mask, [relative_polygon], 255)
+    piece_image = cv2.bitwise_and(crop, crop, mask=mask)
+    polygon_in_image = [
+        Pt(float(point[0]), float(point[1]))
+        for point in relative_polygon.reshape(-1, 2)
+    ]
+    return piece_image, polygon_in_image
+
+
 def detect_pieces(
     corrected: np.ndarray, config: Dict, pixels_per_mm: float
 ) -> Tuple[List[DetectedPiece], np.ndarray, List[str]]:
     """从透视矫正图中提取碎片，并转换为毫米多边形。"""
 
     _, mask = segment_image(corrected, config, pixels_per_mm)
+    mask = restrict_mask_to_piece_search_area(mask, config, pixels_per_mm)
     segmentation = config["segmentation"]
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -410,16 +479,23 @@ def detect_pieces(
         if polygon_px is None:
             warnings.append(f"忽略一个无法简化为 3～5 边形的轮廓，面积 {area_mm2:.1f} mm²")
             continue
+        margin_mm = get_rectify_margin_mm(config)
         points_mm = [
-            Pt(float(point[0]) / pixels_per_mm, float(point[1]) / pixels_per_mm)
+            Pt(
+                float(point[0]) / pixels_per_mm - margin_mm,
+                float(point[1]) / pixels_per_mm - margin_mm,
+            )
             for point in polygon_px
         ]
         polygon_area_mm2 = polygon_area(points_mm)
+        piece_image, polygon_in_image = extract_piece_texture(corrected, polygon_px)
         pieces.append(
             DetectedPiece(
                 contour_px=polygon_px.astype(np.int32),
                 points_mm=points_mm,
                 area_mm2=polygon_area_mm2,
+                piece_image=piece_image,
+                polygon_in_image=polygon_in_image,
             )
         )
 
@@ -433,8 +509,12 @@ def detect_pieces(
     return pieces, mask, warnings
 
 
-def point_mm_to_px(point: Pt, pixels_per_mm: float) -> Tuple[int, int]:
-    return round(point.x * pixels_per_mm), round(point.y * pixels_per_mm)
+def point_mm_to_px(point: Pt, pixels_per_mm: float, config: Dict) -> Tuple[int, int]:
+    margin_px = get_rectify_margin_px(config, pixels_per_mm)
+    return (
+        round(point.x * pixels_per_mm) + margin_px,
+        round(point.y * pixels_per_mm) + margin_px,
+    )
 
 
 def draw_polygon_with_alpha(
@@ -472,17 +552,123 @@ def add_text_banner(image: np.ndarray, text: str) -> np.ndarray:
     return np.vstack((create_text_banner(image.shape[1], text), image))
 
 
+def add_panel_title(image: np.ndarray, title: str) -> np.ndarray:
+    """给单个面板加英文标题栏。"""
+
+    panel = image.copy()
+    height, width = panel.shape[:2]
+    cv2.rectangle(panel, (0, 0), (width - 1, min(42, height - 1)), (20, 20, 20), -1)
+    cv2.putText(
+        panel,
+        title,
+        (14, 29),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+    return panel
+
+
+def create_fit_overlay(
+    corrected: np.ndarray,
+    solution: Optional[Dict],
+    pixels_per_mm: float,
+    config: Dict,
+) -> np.ndarray:
+    """生成仅显示矩形外框和拼接轮廓的误差观察图。"""
+
+    overlay = np.full_like(corrected, 248)
+    if solution is None:
+        cv2.putText(
+            overlay,
+            "NO RECTANGLE SOLUTION",
+            (40, 80),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (50, 50, 50),
+            2,
+            cv2.LINE_AA,
+        )
+        return overlay
+
+    rectangle = np.array(
+        [point_mm_to_px(point, pixels_per_mm, config) for point in solution["rectangle"]["corners"]],
+        dtype=np.int32,
+    )
+    cv2.polylines(overlay, [rectangle], True, (0, 0, 0), 5, cv2.LINE_AA)
+    for corner_index, corner in enumerate(rectangle):
+        point = tuple(int(value) for value in corner)
+        cv2.circle(overlay, point, 7, (0, 0, 0), -1, cv2.LINE_AA)
+        cv2.putText(
+            overlay,
+            str(corner_index),
+            (point[0] + 8, point[1] - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (30, 30, 30),
+            2,
+            cv2.LINE_AA,
+        )
+
+    for placement in solution["placements"]:
+        index = placement["piece_index"]
+        color = COLORS[index % len(COLORS)]
+        polygon = np.array(
+            [point_mm_to_px(point, pixels_per_mm, config) for point in placement["target_pts"]],
+            dtype=np.int32,
+        )
+        cv2.polylines(overlay, [polygon], True, color, 3, cv2.LINE_AA)
+        for vertex in polygon:
+            cv2.circle(overlay, tuple(int(value) for value in vertex), 4, color, -1, cv2.LINE_AA)
+        center = point_mm_to_px(placement["target_center"], pixels_per_mm, config)
+        cv2.circle(overlay, center, 5, color, -1, cv2.LINE_AA)
+        cv2.putText(
+            overlay,
+            str(index),
+            center,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (20, 20, 20),
+            3,
+            cv2.LINE_AA,
+        )
+
+    rectangle_info = solution["rectangle"]
+    short_side, long_side = sorted((rectangle_info["width"], rectangle_info["height"]))
+    info_lines = [
+        f"Rect {long_side:.1f} x {short_side:.1f} mm",
+        f"Area err {solution['area_error'] * 100:.2f}%",
+        "Black = rectangle, Color = assembled pieces",
+    ]
+    for line_index, text in enumerate(info_lines):
+        cv2.putText(
+            overlay,
+            text,
+            (18, corrected.shape[0] - 56 + line_index * 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            (40, 40, 40),
+            1,
+            cv2.LINE_AA,
+        )
+    return overlay
+
+
 def create_result_image(
     corrected: np.ndarray,
     pieces: Sequence[DetectedPiece],
     solution: Optional[Dict],
     pixels_per_mm: float,
     message: str,
+    config: Dict,
 ) -> np.ndarray:
-    """生成左侧检测结果、右侧目标布局的直观对照图。"""
+    """生成检测结果、目标布局和矩形拟合轮廓三栏对照图。"""
 
     before = corrected.copy()
     after = np.full_like(corrected, 245)
+    fit_overlay = create_fit_overlay(corrected, solution, pixels_per_mm, config)
     for index, piece in enumerate(pieces):
         draw_polygon_with_alpha(before, piece.contour_px, COLORS[index % len(COLORS)], 0.22)
         center = np.mean(piece.contour_px, axis=0).astype(int)
@@ -492,20 +678,24 @@ def create_result_image(
         for placement in solution["placements"]:
             index = placement["piece_index"]
             polygon = np.array(
-                [point_mm_to_px(point, pixels_per_mm) for point in placement["target_pts"]],
+                [point_mm_to_px(point, pixels_per_mm, config) for point in placement["target_pts"]],
                 dtype=np.int32,
             )
             draw_polygon_with_alpha(after, polygon, COLORS[index % len(COLORS)], 0.72)
-            center = point_mm_to_px(placement["target_center"], pixels_per_mm)
+            center = point_mm_to_px(placement["target_center"], pixels_per_mm, config)
             cv2.putText(after, str(index), center, cv2.FONT_HERSHEY_SIMPLEX, 0.9, (20, 20, 20), 3)
         rectangle = np.array(
-            [point_mm_to_px(point, pixels_per_mm) for point in solution["rectangle"]["corners"]],
+            [point_mm_to_px(point, pixels_per_mm, config) for point in solution["rectangle"]["corners"]],
             dtype=np.int32,
         )
         cv2.polylines(after, [rectangle], True, (0, 0, 0), 5, cv2.LINE_AA)
 
+    before = add_panel_title(before, "DETECTED PIECES")
+    after = add_panel_title(after, "TARGET ASSEMBLY")
+    fit_overlay = add_panel_title(fit_overlay, "RECTANGLE FIT OVERLAY")
+
     separator = np.full((corrected.shape[0], 8, 3), 90, dtype=np.uint8)
-    combined = np.hstack((before, separator, after))
+    combined = np.hstack((before, separator, after, separator.copy(), fit_overlay))
     if solution is None:
         image_message = "DETECTION FAILED - see latest_result.json"
     else:
@@ -516,6 +706,184 @@ def create_result_image(
             f"area error {solution['area_error'] * 100:.2f}%"
         )
     return add_text_banner(combined, image_message)
+
+
+def build_texture_pieces(pieces: Sequence[DetectedPiece]) -> List[Dict]:
+    """转换为 texture_scorer 所需的输入格式。"""
+
+    return [
+        {
+            "pts": piece.points_mm,
+            "image": piece.piece_image,
+            "polygon_in_image": piece.polygon_in_image,
+        }
+        for piece in pieces
+    ]
+
+
+def score_solution_texture(
+    solution: Dict,
+    pieces: Sequence[DetectedPiece],
+    pixels_per_mm: float,
+    config: Dict,
+) -> Optional[Dict]:
+    """对当前几何解做一次纹理连续性评分。"""
+
+    if not pieces:
+        return None
+    texture = config.get("texture", {})
+    if not bool(texture.get("enabled", True)):
+        return None
+
+    scorer = TextureScorer(
+        mm_per_px=float(texture.get("mm_per_px_override", pixels_per_mm)),
+        strip_width_mm=float(texture.get("strip_width_mm", 5.0)),
+        lambda_texture=float(texture.get("lambda_texture", 0.5)),
+        gw=float(texture.get("gradient_weight", 0.35)),
+        nw=float(texture.get("ncc_weight", 0.30)),
+        ow=float(texture.get("orb_weight", 0.35)),
+    )
+    texture_result = scorer.score_solution(solution, build_texture_pieces(pieces))
+    texture_result["j_texture"] = 1.0 - float(texture_result.get("texture_score", 0.5))
+    texture_result["j_total"] = scorer.total_score(
+        float(solution.get("score", 0.0)),
+        texture_result,
+    )
+    return texture_result
+
+
+def apply_solution_spread(solution: Dict, spread_mm: float) -> Dict:
+    """把目标布局从矩形中心向外轻微推开，减少重叠。"""
+
+    if spread_mm <= 1e-6:
+        return solution
+
+    rectangle = solution.get("rectangle")
+    placements = solution.get("placements")
+    if not rectangle or not placements:
+        return solution
+
+    center = rectangle["center"]
+    for placement in placements:
+        target_center = placement["target_center"]
+        offset = target_center.sub(center)
+        length = offset.length()
+        if length <= 1e-6:
+            continue
+        shift = offset.scale(spread_mm / length)
+        placement["target_center"] = target_center.add(shift)
+        placement["offset"] = placement["target_center"].sub(placement["source_center"])
+        placement["target_pts"] = [point.add(shift) for point in placement["target_pts"]]
+    return solution
+
+
+def estimate_polygon_overlap_mm2(
+    first: Sequence[Pt],
+    second: Sequence[Pt],
+    pixels_per_mm: float,
+) -> float:
+    """用局部栅格近似估计两多边形重叠面积。"""
+
+    min_x = min(point.x for point in first + second)
+    max_x = max(point.x for point in first + second)
+    min_y = min(point.y for point in first + second)
+    max_y = max(point.y for point in first + second)
+    padding_px = 4
+    width = max(4, round((max_x - min_x) * pixels_per_mm) + 1 + padding_px * 2)
+    height = max(4, round((max_y - min_y) * pixels_per_mm) + 1 + padding_px * 2)
+    shift_x = -min_x * pixels_per_mm + padding_px
+    shift_y = -min_y * pixels_per_mm + padding_px
+
+    first_mask = np.zeros((height, width), dtype=np.uint8)
+    second_mask = np.zeros((height, width), dtype=np.uint8)
+    first_polygon = np.array(
+        [(round(point.x * pixels_per_mm + shift_x), round(point.y * pixels_per_mm + shift_y)) for point in first],
+        dtype=np.int32,
+    )
+    second_polygon = np.array(
+        [(round(point.x * pixels_per_mm + shift_x), round(point.y * pixels_per_mm + shift_y)) for point in second],
+        dtype=np.int32,
+    )
+    cv2.fillPoly(first_mask, [first_polygon], 255)
+    cv2.fillPoly(second_mask, [second_polygon], 255)
+    overlap_pixels = cv2.countNonZero(cv2.bitwise_and(first_mask, second_mask))
+    return overlap_pixels / max(pixels_per_mm * pixels_per_mm, 1e-6)
+
+
+def apply_local_overlap_avoidance(
+    solution: Dict,
+    pixels_per_mm: float,
+    config: Dict,
+) -> Tuple[Dict, Dict]:
+    """只对真正重叠的碎片对做局部避让。"""
+
+    placements = solution.get("placements")
+    if not placements:
+        return solution, {"enabled": False, "iterations": 0, "adjusted_pairs": 0, "final_overlap_mm2": 0.0}
+
+    solver = config.get("solver", {})
+    if not bool(solver.get("local_overlap_avoidance", True)):
+        return solution, {"enabled": False, "iterations": 0, "adjusted_pairs": 0, "final_overlap_mm2": 0.0}
+
+    clearance_mm = float(solver.get("local_overlap_clearance_mm", 2.0))
+    step_mm = float(solver.get("local_overlap_step_mm", 1.5))
+    max_iterations = int(solver.get("local_overlap_max_iterations", 8))
+    adjusted_pairs = 0
+    final_overlap_mm2 = 0.0
+
+    for iteration in range(max_iterations):
+        shifts = [Pt(0.0, 0.0) for _ in placements]
+        pair_count = 0
+        total_overlap = 0.0
+
+        for first_index in range(len(placements)):
+            for second_index in range(first_index + 1, len(placements)):
+                first_pts = placements[first_index]["target_pts"]
+                second_pts = placements[second_index]["target_pts"]
+                overlap_mm2 = estimate_polygon_overlap_mm2(first_pts, second_pts, pixels_per_mm)
+                if overlap_mm2 <= 1e-3:
+                    continue
+
+                first_center = placements[first_index]["target_center"]
+                second_center = placements[second_index]["target_center"]
+                direction = second_center.sub(first_center)
+                if direction.length() <= 1e-6:
+                    direction = Pt(float(second_index - first_index), 0.0)
+                unit = direction.norm()
+                overlap_depth_mm = math.sqrt(overlap_mm2)
+                move_each_mm = min(
+                    step_mm,
+                    max(0.5 * clearance_mm, 0.35 * overlap_depth_mm + 0.5 * clearance_mm),
+                )
+                delta = unit.scale(move_each_mm)
+                shifts[first_index] = shifts[first_index].sub(delta)
+                shifts[second_index] = shifts[second_index].add(delta)
+                pair_count += 1
+                total_overlap += overlap_mm2
+
+        if pair_count == 0:
+            return solution, {
+                "enabled": True,
+                "iterations": iteration,
+                "adjusted_pairs": adjusted_pairs,
+                "final_overlap_mm2": final_overlap_mm2,
+            }
+
+        adjusted_pairs += pair_count
+        final_overlap_mm2 = total_overlap
+        for placement, shift in zip(placements, shifts):
+            if shift.length() <= 1e-6:
+                continue
+            placement["target_center"] = placement["target_center"].add(shift)
+            placement["offset"] = placement["target_center"].sub(placement["source_center"])
+            placement["target_pts"] = [point.add(shift) for point in placement["target_pts"]]
+
+    return solution, {
+        "enabled": True,
+        "iterations": max_iterations,
+        "adjusted_pairs": adjusted_pairs,
+        "final_overlap_mm2": final_overlap_mm2,
+    }
 
 
 def solution_to_json(
@@ -606,7 +974,25 @@ def print_result_diagnostics(result: Dict) -> None:
     """将失败原因和关键统计打印到终端。"""
 
     print(f"[{result['timestamp']}] {result['message']}")
+    texture = result.get("texture")
+    if texture:
+        print(
+            "  纹理评分："
+            f"texture={texture.get('texture_score', 0.0):.3f}，"
+            f"gradient={texture.get('gradient_discontinuity', 0.0):.3f}，"
+            f"ncc={texture.get('ncc_similarity', 0.0):.3f}，"
+            f"orb={texture.get('orb_consistency', 0.0):.3f}，"
+            f"j_total={texture.get('j_total', 0.0):.3f}"
+        )
     if result.get("status") == "ok":
+        overlap_adjustment = result.get("overlap_adjustment")
+        if overlap_adjustment and overlap_adjustment.get("enabled"):
+            print(
+                "  局部避让："
+                f"iterations={overlap_adjustment.get('iterations', 0)}，"
+                f"pairs={overlap_adjustment.get('adjusted_pairs', 0)}，"
+                f"final_overlap={overlap_adjustment.get('final_overlap_mm2', 0.0):.2f} mm²"
+            )
         return
 
     diagnostics = result.get("diagnostics", {})
@@ -651,6 +1037,8 @@ def process_frame(frame: np.ndarray, config: Dict, output_dir: Path) -> Tuple[Di
     corrected, pixels_per_mm = perspective_transform(frame, config)
     pieces, mask, warnings = detect_pieces(corrected, config, pixels_per_mm)
     solution = None
+    texture_info = None
+    overlap_adjustment = None
     diagnostics: Dict = {}
 
     if not 2 <= len(pieces) <= 4:
@@ -666,12 +1054,25 @@ def process_frame(frame: np.ndarray, config: Dict, output_dir: Path) -> Tuple[Di
         solution = find_rectangle_solution(
             [{"pts": piece.points_mm} for piece in pieces],
             target_center=Pt(float(target[0]), float(target[1])),
+            overlap_tolerance_mm=float(
+                config.get("solver", {}).get("overlap_tolerance_mm", 2.5)
+            ),
             diagnostics=diagnostics,
         )
         if solution is None:
             status = "no_solution"
             message = f"检测到碎片，但矩形求解失败：{diagnose_solver_failure(diagnostics)}"
         else:
+            solution = apply_solution_spread(
+                solution,
+                float(config.get("solver", {}).get("placement_spread_mm", 0.0)),
+            )
+            solution, overlap_adjustment = apply_local_overlap_avoidance(
+                solution,
+                pixels_per_mm,
+                config,
+            )
+            texture_info = score_solution_texture(solution, pieces, pixels_per_mm, config)
             status = "ok"
             rectangle = solution["rectangle"]
             short_side, long_side = sorted((rectangle["width"], rectangle["height"]))
@@ -679,6 +1080,16 @@ def process_frame(frame: np.ndarray, config: Dict, output_dir: Path) -> Tuple[Di
                 f"拼接成功：{long_side:.1f}×{short_side:.1f} mm，"
                 f"面积误差 {solution['area_error'] * 100:.2f}%"
             )
+            if texture_info is not None:
+                message += f"，纹理分 {texture_info['texture_score']:.3f}"
+            spread_mm = float(config.get("solver", {}).get("placement_spread_mm", 0.0))
+            if spread_mm > 0.0:
+                message += f"，外扩 {spread_mm:.1f} mm"
+            if overlap_adjustment and overlap_adjustment.get("enabled"):
+                message += (
+                    f"，局部避让 {overlap_adjustment.get('iterations', 0)} 轮/"
+                    f"{overlap_adjustment.get('adjusted_pairs', 0)} 对"
+                )
 
     if warnings:
         message += f"；另有 {len(warnings)} 个轮廓被忽略"
@@ -688,13 +1099,18 @@ def process_frame(frame: np.ndarray, config: Dict, output_dir: Path) -> Tuple[Di
         float(config["workspace"]["width_mm"]),
         float(config["workspace"]["height_mm"]),
     ]
+    result["texture"] = texture_info
+    result["overlap_adjustment"] = overlap_adjustment
     result["warnings"] = warnings
-    result_image = create_result_image(corrected, pieces, solution, pixels_per_mm, message)
+    result_image = create_result_image(corrected, pieces, solution, pixels_per_mm, message, config)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output_dir / "latest_corrected.jpg"), corrected)
     cv2.imwrite(str(output_dir / "latest_mask.png"), mask)
     cv2.imwrite(str(output_dir / "latest_result.jpg"), result_image)
+    for piece_index, piece in enumerate(pieces):
+        if piece.piece_image is not None:
+            cv2.imwrite(str(output_dir / f"latest_piece_{piece_index}.png"), piece.piece_image)
     with (output_dir / "latest_result.json").open("w", encoding="utf-8") as file:
         json.dump(result, file, ensure_ascii=False, indent=2)
     return result, result_image
@@ -713,9 +1129,14 @@ def create_debug_view(
         threshold_override=threshold,
         morphology_override=morphology_mm,
     )
+    mask = restrict_mask_to_piece_search_area(mask, config, pixels_per_mm)
     contour_view = corrected.copy()
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(contour_view, contours, -1, (0, 220, 0), 3)
+    margin_px = get_rectify_margin_px(config, pixels_per_mm)
+    workspace_height_px = round(float(config["workspace"]["height_mm"]) * pixels_per_mm)
+    split_y = margin_px + workspace_height_px // 2
+    cv2.line(contour_view, (0, split_y), (corrected.shape[1] - 1, split_y), (0, 0, 255), 2, cv2.LINE_AA)
 
     panel_width = corrected.shape[1] // 2
     panel_height = corrected.shape[0] // 2
@@ -723,10 +1144,10 @@ def create_debug_view(
     def panel(image: np.ndarray, title: str) -> np.ndarray:
         if len(image.shape) == 2:
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        result = cv2.resize(image, (panel_width, panel_height), interpolation=cv2.INTER_AREA)
-        cv2.rectangle(result, (0, 0), (panel_width - 1, 42), (20, 20, 20), -1)
+        resized = cv2.resize(image, (panel_width, panel_height), interpolation=cv2.INTER_AREA)
+        title_bar = np.full((42, panel_width, 3), 20, dtype=np.uint8)
         cv2.putText(
-            result,
+            title_bar,
             title,
             (14, 29),
             cv2.FONT_HERSHEY_SIMPLEX,
@@ -735,7 +1156,7 @@ def create_debug_view(
             2,
             cv2.LINE_AA,
         )
-        return result
+        return np.vstack((title_bar, resized))
 
     top = np.hstack((panel(corrected, "CORRECTED"), panel(gray, "GRAY")))
     bottom = np.hstack((panel(mask, "BINARY MASK"), panel(contour_view, "CONTOURS")))

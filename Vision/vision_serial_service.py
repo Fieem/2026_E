@@ -74,11 +74,19 @@ def print_result_frame_debug(result: dict, responses: List[bytes], sequence: int
         place_j2 = float(placement["place_j2_rad"])
         pick_wrist = float(placement["pick_wrist_rad"])
         place_wrist = float(placement["place_wrist_rad"])
+        pick_wrist_abs_cam = float(placement.get("pick_wrist_abs_rad", pick_wrist))
+        place_wrist_abs_cam = float(placement.get("place_wrist_abs_rad", place_wrist))
+        pick_wrist_abs_base = float(placement.get("pick_wrist_abs_base_rad", pick_wrist))
+        place_wrist_abs_base = float(placement.get("place_wrist_abs_base_rad", place_wrist))
+        pick_tool_abs_base = float(placement.get("pick_tool_abs_base_rad", pick_wrist))
         print(
             f"  帧 {piece_index}: piece={piece_index}, bytes={len(response)}, "
             f"pick_j1={pick_j1:.4f}, place_j1={place_j1:.4f}, "
             f"pick_j2={pick_j2:.4f}, place_j2={place_j2:.4f}, "
-            f"pick_wrist={pick_wrist:.4f}, place_wrist={place_wrist:.4f}"
+            f"pick_wrist={pick_wrist:.4f}, place_wrist={place_wrist:.4f}, "
+            f"pick_abs_cam={pick_wrist_abs_cam:.4f}, place_abs_cam={place_wrist_abs_cam:.4f}, "
+            f"pick_abs_base={pick_wrist_abs_base:.4f}, place_abs_base={place_wrist_abs_base:.4f}, "
+            f"pick_tool_abs_base={pick_tool_abs_base:.4f}, pick_mode=fixed"
         )
 
 
@@ -102,8 +110,34 @@ def make_result_frames(result: dict, sequence: int, parameters: ScaraParameters)
         placement["place_j1_rad"] = place_j1
         placement["pick_j2_rad"] = pick_j2
         placement["place_j2_rad"] = place_j2
-        pick_wrist = float(placement["pick_wrist_rad"])
-        place_wrist = float(placement["place_wrist_rad"])
+        pick_absolute_orientation = float(placement["pick_wrist_rad"])
+        place_absolute_orientation = float(placement["place_wrist_rad"])
+        pick_absolute_orientation_base = parameters.orientation_camera_to_base(
+            pick_absolute_orientation
+        )
+        place_absolute_orientation_base = parameters.orientation_camera_to_base(
+            place_absolute_orientation
+        )
+        pick_wrist = parameters.fixed_pick_wrist_command()
+        place_wrist = parameters.place_wrist_from_pick_and_target(
+            pick_absolute_orientation,
+            place_absolute_orientation,
+            pick_j1,
+            pick_j2,
+            place_j1,
+            place_j2,
+        )
+        pick_tool_abs_base = parameters.fixed_pick_absolute_orientation_base(
+            pick_j1,
+            pick_j2,
+        )
+        placement["pick_wrist_abs_rad"] = pick_absolute_orientation
+        placement["place_wrist_abs_rad"] = place_absolute_orientation
+        placement["pick_wrist_abs_base_rad"] = pick_absolute_orientation_base
+        placement["place_wrist_abs_base_rad"] = place_absolute_orientation_base
+        placement["pick_tool_abs_base_rad"] = pick_tool_abs_base
+        placement["pick_wrist_rad"] = pick_wrist
+        placement["place_wrist_rad"] = place_wrist
         values = (pick_j1, place_j1, pick_j2, place_j2, pick_wrist, place_wrist)
         if not all(math.isfinite(value) for value in values):
             raise KinematicsError(f"碎片 {piece_index} 产生了非有限角度")

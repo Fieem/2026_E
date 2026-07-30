@@ -551,6 +551,8 @@ def find_rectangle_solution(
     ),
     dimension_tolerance_mm: float = 3.0,
     max_search_nodes: int = 20_000,
+    max_candidates_per_node: int = 64,
+    max_partial_candidates_per_node: int = 12,
     diagnostics: Optional[Dict] = None,
 ) -> Optional[Dict]:
     """寻找一个互不重叠且组合后能够填满矩形的布局。
@@ -621,13 +623,16 @@ def find_rectangle_solution(
         "dimension_rejections": 0,
         "area_rejections": 0,
         "no_candidate_nodes": 0,
+        "candidate_pruned_by_limit": 0,
         "candidate_counts_by_depth": [],
         "anchor_index": anchor_index,
         "piece_count": len(prepared),
         "total_piece_area_mm2": total_piece_area,
     }
 
-    def partial_geometry_valid(candidate_polygons: Iterable[Sequence[Pt]]) -> bool:
+    def partial_geometry_rectangle(
+        candidate_polygons: Iterable[Sequence[Pt]],
+    ) -> Optional[Dict]:
         if size_range_mm is None:
             maximum_final_area = float("inf")
         else:
@@ -637,19 +642,19 @@ def find_rectangle_solution(
         all_points = [point for polygon in candidate_polygons for point in polygon]
         rectangle = minimum_area_rectangle(all_points)
         if rectangle is None:
-            return False
+            return None
         # 当前外接矩形已经超过最终允许面积时，后续只会继续变大，直接剪枝。
         if rectangle["area"] > maximum_final_area + EPS:
-            return False
+            return None
         if size_range_mm is None:
-            return True
+            return rectangle
         short_range, long_range = size_range_mm
         maximum_area = (
             (short_range[1] + dimension_tolerance_mm)
             * (long_range[1] + dimension_tolerance_mm)
         )
         if rectangle["area"] > maximum_area + EPS:
-            return False
+            return None
 
         maximum_diagonal = math.hypot(
             short_range[1] + dimension_tolerance_mm,
@@ -658,8 +663,8 @@ def find_rectangle_solution(
         for first_index, first in enumerate(all_points):
             for second in all_points[first_index + 1 :]:
                 if first.dist(second) > maximum_diagonal:
-                    return False
-        return True
+                    return None
+        return rectangle
 
     def evaluate(edge_error: float) -> bool:
         nonlocal best_solution
@@ -709,9 +714,12 @@ def find_rectangle_solution(
         candidate_keys: Set[Tuple] = set()
         candidates = []
         unplaced = [piece["index"] for piece in prepared if piece["index"] not in poses]
+        placed_polygons = list(world_polygons.values())
+        current_placed_area = sum(prepared[index]["area"] for index in poses)
 
         for moving_index in unplaced:
             moving_points = prepared[moving_index]["local_points"]
+            moving_area = prepared[moving_index]["area"]
             for fixed_index, fixed_polygon in list(world_polygons.items()):
                 for fixed_edge_index in range(len(fixed_polygon)):
                     fixed_start, fixed_end = _edge(fixed_polygon, fixed_edge_index)
@@ -761,33 +769,23 @@ def find_rectangle_solution(
                                     placed_polygon,
                                     overlap_tolerance_mm,
                                 )
-                                for placed_polygon in world_polygons.values()
+                                for placed_polygon in placed_polygons
                             ):
                                 stats["overlap_rejections"] += 1
                                 continue
-                            if not partial_geometry_valid(
-                                list(world_polygons.values()) + [candidate_polygon]
-                            ):
+                            partial_rectangle = partial_geometry_rectangle(
+                                placed_polygons + [candidate_polygon]
+                            )
+                            if partial_rectangle is None:
                                 stats["geometry_rejections"] += 1
                                 continue
 
-                            partial_rectangle = minimum_area_rectangle(
-                                [
-                                    point
-                                    for polygon in list(world_polygons.values())
-                                    + [candidate_polygon]
-                                    for point in polygon
-                                ]
-                            )
-                            placed_area = prepared[moving_index]["area"] + sum(
-                                prepared[index]["area"] for index in poses
-                            )
+                            placed_area = current_placed_area + moving_area
                             empty_area_ratio = 0.0
-                            if partial_rectangle is not None:
-                                empty_area_ratio = max(
-                                    0.0,
-                                    partial_rectangle["area"] - placed_area,
-                                ) / total_piece_area
+                            empty_area_ratio = max(
+                                0.0,
+                                partial_rectangle["area"] - placed_area,
+                            ) / total_piece_area
 
                             # 等长接缝比任意局部接触包含更多约束信息。局部接触
                             # 仍保留给 T 形接缝，但在真正的整边匹配之后再尝试。
@@ -836,6 +834,20 @@ def find_rectangle_solution(
                 -candidate[-3],
             )
         )
+        if len(candidates) > max_candidates_per_node:
+            kept_candidates = []
+            kept_partial = 0
+            for candidate in candidates:
+                if len(kept_candidates) >= max_candidates_per_node:
+                    break
+                if candidate[-2]:
+                    kept_candidates.append(candidate)
+                    continue
+                if kept_partial < max_partial_candidates_per_node:
+                    kept_candidates.append(candidate)
+                    kept_partial += 1
+            stats["candidate_pruned_by_limit"] += max(0, len(candidates) - len(kept_candidates))
+            candidates = kept_candidates
         for candidate in candidates:
             (
                 moving_index,
