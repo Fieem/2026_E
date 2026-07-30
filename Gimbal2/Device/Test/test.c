@@ -394,25 +394,21 @@ static void screen_output_unlock(void)
 
 static int screen_uart_write(const uint8_t *data, uint16_t length)
 {
-    uint32_t start = HAL_GetTick();
-    uint16_t i;
-
-    for (i = 0U; i < length; i++)
-    {
-        while ((USART3->SR & USART_SR_TXE) == 0U)
-        {
-            if ((HAL_GetTick() - start) >= 100U)
-            {
-                return 0;
-            }
-        }
-        USART3->DR = data[i];
+    /* 使用 DMA 发送（DMA1_Stream3，已在 MSP Init 中配置） */
+    if (HAL_UART_Transmit_DMA(&huart3, (uint8_t *)data, length) != HAL_OK) {
+        return 0;
     }
-
-    while ((USART3->SR & USART_SR_TC) == 0U)
-    {
-        if ((HAL_GetTick() - start) >= 100U)
-        {
+    /* 等待 DMA 传输完成 */
+    uint32_t start = HAL_GetTick();
+    while (huart3.TxXferCount > 0U) {
+        if ((HAL_GetTick() - start) >= 100U) {
+            HAL_UART_AbortTransmit(&huart3);
+            return 0;
+        }
+    }
+    /* 等待最后一个字节从移位寄存器发出 */
+    while ((USART3->SR & USART_SR_TC) == 0U) {
+        if ((HAL_GetTick() - start) >= 200U) {
             return 0;
         }
     }
