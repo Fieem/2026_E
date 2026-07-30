@@ -41,16 +41,17 @@ void SG90_SetAngle(uint8_t angle)
     __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_4, pulse);
 }
 /**
-  * @brief  根据X坐标线性计算舵机下降角度
-  * @param  x_mm ：物理X坐标(mm)，范围 0~210
+  * @brief  根据电机角度计算舵机下降角度（取绝对值）
+  * @param  angle ：电机角度(度)，范围 ±180
   * @retval 舵机角度 0~180
-  * @note   X越大离底座越近→下垂越小→下降角度越大
+  * @note   角度绝对值越大→离底座越近→下垂越小→下降角度越大
   */
-uint8_t CalcPickAngle(float x_mm)
+uint8_t CalcPickAngle(float angle)
 {
-    if (x_mm <= COMP_X_MIN) return COMP_LOW_MIN;
-    if (x_mm >= COMP_X_MAX) return COMP_LOW_MAX;
-    float ratio = (x_mm - COMP_X_MIN) / (float)(COMP_X_MAX - COMP_X_MIN);
+    float abs_angle = (angle >= 0.0f) ? angle : -angle;
+    if (abs_angle <= COMP_ANGLE_MIN) return COMP_LOW_MIN;
+    if (abs_angle >= COMP_ANGLE_MAX) return COMP_LOW_MAX;
+    float ratio = (abs_angle - COMP_ANGLE_MIN) / (float)(COMP_ANGLE_MAX - COMP_ANGLE_MIN);
     return (uint8_t)(COMP_LOW_MIN + ratio * (COMP_LOW_MAX - COMP_LOW_MIN) + 0.5f);
 }
 /**********************************************************

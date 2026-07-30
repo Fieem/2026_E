@@ -23,18 +23,16 @@ void StartReceiveTask(void *argument)
             comm_task_ready = false;
 
             if (arm_state == ARM_IDLE && arm_cmd.type == CMD_NONE) {
-                /* 第一段 TASK → 抓取 */
-                arm_cmd.pick_dist = comm_dist_x;
-                arm_cmd.pick_x    = comm_angle1;
-                arm_cmd.pick_y    = comm_angle2;
-                arm_cmd.type      = CMD_TASK;
+                /* 第一段 TASK → 初始位置 */
+                arm_cmd.pick_x = comm_angle1;
+                arm_cmd.pick_y = comm_angle2;
+                arm_cmd.type   = CMD_TASK;
             }
             else if (arm_state == ARM_WAIT_PLACE && arm_cmd.type == CMD_NONE) {
-                /* 第二段 TASK → 放置 */
-                arm_cmd.place_dist = comm_dist_x;
-                arm_cmd.place_x    = comm_angle1;
-                arm_cmd.place_y    = comm_angle2;
-                arm_cmd.type       = CMD_PLACE;
+                /* 第二段 TASK → 放置位置 */
+                arm_cmd.place_x = comm_angle1;
+                arm_cmd.place_y = comm_angle2;
+                arm_cmd.type    = CMD_PLACE;
             }
         }
 
