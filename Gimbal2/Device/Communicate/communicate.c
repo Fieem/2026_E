@@ -91,6 +91,10 @@ static void comm_pi_parse_line(const char *line)
         char *msg = strtok_r(NULL, ",", &saveptr);
         printsf(0, "BUSY: %s", msg ? msg : "");
     }
+    else if (strcmp_upper(cmd, "WIN") == 0) {
+        comm_win_flag = true;
+        printsf(0, "WIN");
+    }
     /* 未知命令 → 静默忽略 */
 }
 

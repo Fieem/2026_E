@@ -47,8 +47,8 @@ typedef struct {
     ArmCmdType_t type;
     int32_t      pick_x;        /* 初始位置 电机1 (度) */
     int32_t      pick_y;        /* 初始位置 电机2 (度) */
-    int32_t      place_x;       /* 放置位置 电机1 (度) */
     int32_t      place_y;       /* 放置位置 电机2 (度) */
+    int32_t      place_x;       /* 放置位置 电机1 (度) */
 } ArmCmd_t;
 
 extern ArmCmd_t   arm_cmd;
@@ -58,5 +58,7 @@ extern ArmState_t arm_state;
 extern bool    comm_task_ready;
 extern int32_t comm_angle1;
 extern int32_t comm_angle2;
+
+extern bool    comm_win_flag;
 
 #endif //INC_2024E_PUBLIC_H

@@ -20,7 +20,7 @@ void StartMotorTask(void *argument)
     USER_CAN1_Filter_Init();
     Emm_V5_Origin_Trigger_Return(1, 0, false);
     Emm_V5_Origin_Trigger_Return(2, 0, false);
-    osDelay(MOTOR_DELAY_MS);
+    osDelay(1000);
 
     HAL_GPIO_TogglePin(GPIOF, GPIO_PIN_9);
 

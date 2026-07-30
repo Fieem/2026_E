@@ -15,3 +15,5 @@ ArmState_t arm_state = ARM_IDLE;
 bool    comm_task_ready = false;
 int32_t comm_angle1     = 0;
 int32_t comm_angle2     = 0;
+
+bool    comm_win_flag   = false;

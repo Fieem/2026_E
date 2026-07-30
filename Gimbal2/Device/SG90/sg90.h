@@ -19,7 +19,7 @@
 
 #define Low_Angle   140
 
-#define High_Angle   10
+#define High_Angle   12
 /**
   * @brief  SG90 初始化，开启 PWM 输出
   * @param  无
