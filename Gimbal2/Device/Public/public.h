@@ -13,7 +13,7 @@
 #define MAGNET_DELAY_MS     1000U    /* 电磁铁稳定延时(ms)    */
 
 /* ---- 脉冲 ↔ 角度换算 ---- */
-#define PULSES_PER_REV      3200U
+#define PULSES_PER_REV      6400U
 #define PULSES_TO_DEG(p)    ((float)(p) * 360.0f / (float)PULSES_PER_REV)
 
 /* ---- 全局变量 ---- */
