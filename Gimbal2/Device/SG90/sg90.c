@@ -40,7 +40,19 @@ void SG90_SetAngle(uint8_t angle)
 
     __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_4, pulse);
 }
-
+/**
+  * @brief  根据X坐标线性计算舵机下降角度
+  * @param  x_mm ：物理X坐标(mm)，范围 0~210
+  * @retval 舵机角度 0~180
+  * @note   X越大离底座越近→下垂越小→下降角度越大
+  */
+uint8_t CalcPickAngle(float x_mm)
+{
+    if (x_mm <= COMP_X_MIN) return COMP_LOW_MIN;
+    if (x_mm >= COMP_X_MAX) return COMP_LOW_MAX;
+    float ratio = (x_mm - COMP_X_MIN) / (float)(COMP_X_MAX - COMP_X_MIN);
+    return (uint8_t)(COMP_LOW_MIN + ratio * (COMP_LOW_MAX - COMP_LOW_MIN) + 0.5f);
+}
 /**********************************************************
   ***   电磁铁驱动
   ***   引脚：PA5 (Magnet)

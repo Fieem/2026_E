@@ -13,6 +13,7 @@ ArmState_t arm_state = ARM_IDLE;
 
 /* ---- TASK 协议解析结果 ---- */
 bool    comm_task_ready = false;
+float comm_dist_x    = 0;
 float comm_angle1     = 0;
 float comm_angle2     = 0;
 

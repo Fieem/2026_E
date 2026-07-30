@@ -3,8 +3,8 @@
 // 机械臂状态机 - 两段 TASK 交互
 //
 // 流程:
-//   TASK(p1,p2) → 移动到初始 → 舵机下降 → 电磁铁吸合 → 发 PICK
-//   TASK(p3,p4) → 舵机上升 → 移动到放置 → 舵机下降 → 电磁铁释放 → 舵机上升 → FINISH
+//   TASK(dist,a1,a2) → 移动到初始 → 舵机下降(CalcPickAngle) → 电磁铁吸合 → 舵机上升 → 发 PICK
+//   TASK(dist,a1,a2) → 移动到放置 → 舵机下降(CalcPickAngle) → 电磁铁释放 → 舵机上升 → FINISH
 //
 #include "main.h"
 #include "can.h"
@@ -41,7 +41,7 @@ void StartMotorTask(void *argument)
         case ARM_MOVING_TO_START:
             osDelay(MOTOR_DELAY_MS);
             arm_state = ARM_SERVO_PICK_DOWN;
-            SG90_SetAngle(Low_Angle);
+            SG90_SetAngle(CalcPickAngle(arm_cmd.pick_dist));
             break;
 
         case ARM_SERVO_PICK_DOWN:
@@ -75,7 +75,7 @@ void StartMotorTask(void *argument)
         case ARM_MOVING_TO_PLACE:
             osDelay(MOTOR_DELAY_MS);
             arm_state = ARM_SERVO_PLACE_DOWN;
-            SG90_SetAngle(100);  //不要下去那么多，直接抛下去
+            SG90_SetAngle(CalcPickAngle(arm_cmd.place_dist));
             break;
 
         case ARM_SERVO_PLACE_DOWN:
