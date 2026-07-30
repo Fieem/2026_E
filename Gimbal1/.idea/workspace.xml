@@ -35,21 +35,7 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1f7f0edf-0229-41fd-adbd-51ee79e766d0" name="更改" comment="Gimbal1_init">
-      <change beforePath="$PROJECT_DIR$/.idea/debugServers/ST_LINK.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/debugServers/ST_LINK.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/App/gimbal_task.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/App/gimbal_task.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/App/receive_task.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/App/receive_task.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/App/scara_j1_config.h" beforeDir="false" afterPath="$PROJECT_DIR$/App/scara_j1_config.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/App/vision_comm.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/App/vision_comm.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Core/Src/freertos.c" beforeDir="false" afterPath="$PROJECT_DIR$/Core/Src/freertos.c" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Core/Src/usart.c" beforeDir="false" afterPath="$PROJECT_DIR$/Core/Src/usart.c" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Gimbal1.ioc" beforeDir="false" afterPath="$PROJECT_DIR$/Gimbal1.ioc" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../Gimbal2/2026E.ioc" beforeDir="false" afterPath="$PROJECT_DIR$/../Gimbal2/2026E.ioc" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../Gimbal2/Core/Src/usart.c" beforeDir="false" afterPath="$PROJECT_DIR$/../Gimbal2/Core/Src/usart.c" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../Vision/vision_config.json" beforeDir="false" afterPath="$PROJECT_DIR$/../Vision/vision_config.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../Vision/vision_serial_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/../Vision/vision_serial_service.py" afterDir="false" />
-    </list>
+    <list default="true" id="1f7f0edf-0229-41fd-adbd-51ee79e766d0" name="更改" comment="Gimbal1_init" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -198,7 +184,7 @@
       <workItem from="1785331283477" duration="315000" />
       <workItem from="1785331614207" duration="313000" />
       <workItem from="1785331933963" duration="1150000" />
-      <workItem from="1785374075256" duration="8884000" />
+      <workItem from="1785374075256" duration="9477000" />
     </task>
     <task id="LOCAL-00001" summary="7.5start">
       <option name="closed" value="true" />
