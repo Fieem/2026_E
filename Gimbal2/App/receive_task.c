@@ -63,3 +63,12 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         HAL_UART_Receive_IT(TEST_VOFA_HUART, &s_rx_byte, 1);
     }
 }
+/* 错误回调：噪声/过载导致 USART 停摆时自动恢复 */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART1) {
+        HAL_UART_Receive_IT(&huart1, &comm_rx_byte, 1);
+    } else if (huart == TEST_VOFA_HUART) {
+        HAL_UART_Receive_IT(TEST_VOFA_HUART, &s_rx_byte, 1);
+    }
+}
