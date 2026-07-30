@@ -9,8 +9,8 @@
 
 /* ---- 延时宏定义（用户自行调整）---- */
 #define MOTOR_DELAY_MS      6000U   /* 电机移动到位延时(ms) */
-#define SERVO_DELAY_MS      500U    /* 舵机动作延时(ms)      */
-#define MAGNET_DELAY_MS     300U    /* 电磁铁稳定延时(ms)    */
+#define SERVO_DELAY_MS      1500U    /* 舵机动作延时(ms)      */
+#define MAGNET_DELAY_MS     1000U    /* 电磁铁稳定延时(ms)    */
 
 /* ---- 脉冲 ↔ 角度换算 ---- */
 #define PULSES_PER_REV      3200U
