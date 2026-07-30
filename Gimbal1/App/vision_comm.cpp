@@ -17,7 +17,6 @@ constexpr uint16_t kSequenceMask = 0x0FFFU;
 constexpr uint16_t kCountMask = 0x3U;
 constexpr uint16_t kIndexMask = 0x3U;
 constexpr uint8_t kFrameLengthWithoutData = 4U;
-constexpr bool kDebugSingleFrameReady = true;
 
 ScaraVisionState vision_state = SCARA_VISION_STATE_IDLE;
 ScaraVisionError vision_error = SCARA_VISION_ERROR_NONE;
@@ -36,6 +35,26 @@ uint8_t countFromFlags(uint16_t flags) {
 
 uint8_t indexFromFlags(uint16_t flags) {
     return static_cast<uint8_t>((flags >> 14U) & kIndexMask);
+}
+
+uint8_t contiguousReceivedCount(uint8_t mask) {
+    uint8_t count = 0U;
+    while ((mask & (1U << count)) != 0U && count < SCARA_MAX_VISION_PIECES) {
+        ++count;
+    }
+    return count;
+}
+
+bool sendVisionCommand(const uint16_t cmd_id, const uint16_t flags) {
+    const uint8_t frame[2U + kFrameLengthWithoutData] = {
+        SCARA_FRAME_HEADER,
+        kFrameLengthWithoutData,
+        static_cast<uint8_t>(cmd_id & 0xFFU),
+        static_cast<uint8_t>((cmd_id >> 8U) & 0xFFU),
+        static_cast<uint8_t>(flags & 0xFFU),
+        static_cast<uint8_t>((flags >> 8U) & 0xFFU),
+    };
+    return HAL_UART_Transmit(&huart1, const_cast<uint8_t *>(frame), sizeof(frame), 100U) == HAL_OK;
 }
 
 bool validJointAngle(float value, float minimum, float maximum) {
@@ -67,15 +86,6 @@ extern "C" bool Vision_RequestStart(void) {
     if (sequence == 0U) sequence = 1U;
     next_sequence = sequence;
 
-    uint8_t frame[2U + kFrameLengthWithoutData] = {
-        SCARA_FRAME_HEADER,
-        kFrameLengthWithoutData,
-        static_cast<uint8_t>(SCARA_CMD_VISION_START & 0xFFU),
-        static_cast<uint8_t>((SCARA_CMD_VISION_START >> 8U) & 0xFFU),
-        static_cast<uint8_t>(sequence & 0xFFU),
-        static_cast<uint8_t>((sequence >> 8U) & 0xFFU),
-    };
-
     vision_state = SCARA_VISION_STATE_WAITING;
     vision_error = SCARA_VISION_ERROR_NONE;
     vision_result = ScaraVisionResult{};
@@ -83,7 +93,33 @@ extern "C" bool Vision_RequestStart(void) {
     vision_result.sequence = sequence;
     vision_started_tick = HAL_GetTick();
 
-    if (HAL_UART_Transmit(&huart1, frame, sizeof(frame), 100U) != HAL_OK) {
+    if (!sendVisionCommand(SCARA_CMD_VISION_START, sequence)) {
+        setError(SCARA_VISION_ERROR_UART);
+        return false;
+    }
+    return true;
+}
+
+extern "C" bool Vision_RequestNext(void) {
+    if (vision_result.sequence == 0U || vision_state == SCARA_VISION_STATE_WAITING) {
+        return false;
+    }
+    if (vision_result.expected_piece_count == 0U) {
+        return false;
+    }
+
+    const uint8_t next_piece_index = contiguousReceivedCount(vision_result.received_mask);
+    if (next_piece_index >= vision_result.expected_piece_count) {
+        return false;
+    }
+
+    const uint16_t flags = static_cast<uint16_t>(
+        vision_result.sequence | (static_cast<uint16_t>(next_piece_index) << 14U));
+
+    vision_state = SCARA_VISION_STATE_WAITING;
+    vision_result.state = SCARA_VISION_STATE_WAITING;
+    vision_started_tick = HAL_GetTick();
+    if (!sendVisionCommand(SCARA_CMD_VISION_NEXT, flags)) {
         setError(SCARA_VISION_ERROR_UART);
         return false;
     }
@@ -105,9 +141,11 @@ extern "C" void Vision_OnResultFrame(
     const uint16_t sequence = sequenceFromFlags(flags);
     const uint8_t piece_count = countFromFlags(flags);
     const uint8_t piece_index = indexFromFlags(flags);
+    const uint8_t expected_piece_index = contiguousReceivedCount(vision_result.received_mask);
     if (sequence != vision_result.sequence ||
         piece_count < 2U || piece_count > SCARA_MAX_VISION_PIECES ||
-        piece_index >= piece_count || !validPose(data)) {
+        piece_index >= piece_count || piece_index != expected_piece_index ||
+        !validPose(data)) {
         setError(SCARA_VISION_ERROR_INVALID_FRAME);
         return;
     }
@@ -127,19 +165,8 @@ extern "C" void Vision_OnResultFrame(
     vision_result.received_mask = static_cast<uint8_t>(
         vision_result.received_mask | (1U << piece_index));
 
-    if (kDebugSingleFrameReady) {
-        vision_result.expected_piece_count = 1U;
-        vision_result.received_mask = 0x01U;
-        vision_state = SCARA_VISION_STATE_READY;
-        vision_result.state = SCARA_VISION_STATE_READY;
-        return;
-    }
-
-    const uint8_t expected_mask = static_cast<uint8_t>((1U << piece_count) - 1U);
-    if (vision_result.received_mask == expected_mask) {
-        vision_state = SCARA_VISION_STATE_READY;
-        vision_result.state = SCARA_VISION_STATE_READY;
-    }
+    vision_state = SCARA_VISION_STATE_READY;
+    vision_result.state = SCARA_VISION_STATE_READY;
 }
 
 extern "C" void Vision_OnErrorFrame(
@@ -168,6 +195,8 @@ extern "C" bool Vision_GetResult(ScaraVisionResult *result) {
     *result = vision_result;
     result->state = vision_state;
     result->error = vision_error;
+    vision_state = SCARA_VISION_STATE_IDLE;
+    vision_result.state = SCARA_VISION_STATE_IDLE;
     taskEXIT_CRITICAL();
     return true;
 }

@@ -63,3 +63,19 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         HAL_UART_Receive_IT(TEST_VOFA_HUART, &s_rx_byte, 1);
     }
 }
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART1)
+    {
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        __HAL_UART_CLEAR_NEFLAG(huart);
+        __HAL_UART_CLEAR_FEFLAG(huart);
+        __HAL_UART_CLEAR_PEFLAG(huart);
+        HAL_UART_Receive_IT(&huart1, &comm_rx_byte, 1);
+    }
+    else if (huart == TEST_VOFA_HUART)
+    {
+        HAL_UART_Receive_IT(TEST_VOFA_HUART, &s_rx_byte, 1);
+    }
+}

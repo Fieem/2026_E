@@ -35,7 +35,13 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1f7f0edf-0229-41fd-adbd-51ee79e766d0" name="更改" comment="Gimbal1_init" />
+    <list default="true" id="1f7f0edf-0229-41fd-adbd-51ee79e766d0" name="更改" comment="Gimbal1_init">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/App/gimbal2_link.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/App/gimbal2_link.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/App/gimbal_task.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/App/gimbal_task.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/App/scara_protocol.h" beforeDir="false" afterPath="$PROJECT_DIR$/App/scara_protocol.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/App/vision_comm.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/App/vision_comm.cpp" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -184,7 +190,7 @@
       <workItem from="1785331283477" duration="315000" />
       <workItem from="1785331614207" duration="313000" />
       <workItem from="1785331933963" duration="1150000" />
-      <workItem from="1785374075256" duration="9843000" />
+      <workItem from="1785374075256" duration="12454000" />
     </task>
     <task id="LOCAL-00001" summary="7.5start">
       <option name="closed" value="true" />
@@ -223,7 +229,7 @@
       <breakpoints>
         <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
           <url>file://$PROJECT_DIR$/App/gimbal2_link.cpp</url>
-          <line>166</line>
+          <line>194</line>
           <properties>
             <option name="hitCountValue" value="1" />
           </properties>

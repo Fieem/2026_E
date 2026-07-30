@@ -63,6 +63,7 @@ typedef enum {
     SCARA_CMD_VISION_START = 0x0201,
     SCARA_CMD_VISION_RESULT = 0x0202,
     SCARA_CMD_VISION_ERROR = 0x0203,
+    SCARA_CMD_VISION_NEXT = 0x0204,
 } ScaraVisionCommandId;
 
 typedef enum {
@@ -107,6 +108,7 @@ bool ScaraJ1_GetStatus(ScaraJ1Status *status);
 
 // These functions are called from a FreeRTOS task, not an interrupt callback.
 bool Vision_RequestStart(void);
+bool Vision_RequestNext(void);
 void Vision_Poll(void);
 void Vision_OnResultFrame(uint16_t flags, const float *data, uint8_t float_num);
 void Vision_OnErrorFrame(uint16_t flags, uint16_t error_code);

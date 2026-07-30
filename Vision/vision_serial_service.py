@@ -9,13 +9,23 @@ import sys
 from pathlib import Path
 from typing import List
 
+import cv2
+
 try:
     import serial
 except ImportError as error:  # pragma: no cover - 树莓派部署环境提供
     raise SystemExit("缺少 pyserial，请安装 python3-serial") from error
 
 from algorithm import Pt
-from camera_pipeline import DEFAULT_HEIGHT, DEFAULT_WIDTH, load_config, open_camera, process_frame
+from camera_pipeline import (
+    DEFAULT_HEIGHT,
+    DEFAULT_WIDTH,
+    add_text_banner,
+    create_debug_view,
+    load_config,
+    open_camera,
+    process_frame,
+)
 from scara_kinematics import KinematicsError, ScaraParameters
 from serial_protocol import (
     ERROR_BUSY,
@@ -24,14 +34,30 @@ from serial_protocol import (
     ERROR_INVALID_CONFIG,
     ERROR_NO_SOLUTION,
     FrameParser,
+    VISION_NEXT,
     VISION_START,
     decode_flags,
     pack_error,
     pack_result,
 )
 
-RESULT_FRAME_GAP_S = 0.005
-RESULT_FRAME_LIMIT = 1
+RESULT_FRAME_GAP_S = 0.1
+RESULT_FRAME_LIMIT = 0
+PREVIEW_WINDOW_NAME = "Vision Serial Preview"
+RESULT_WINDOW_NAME = "Vision Serial Result"
+
+
+def show_preview(frame, config: dict, debug_view: bool) -> None:
+    """在串口服务运行时显示实时预览或调试画面。"""
+
+    if debug_view:
+        threshold = int(config["segmentation"].get("threshold", 0))
+        morphology_mm = float(config["segmentation"].get("morphology_mm", 0.8))
+        preview = create_debug_view(frame, config, threshold, morphology_mm)
+    else:
+        preview = add_text_banner(frame, "SERIAL SERVICE RUNNING - waiting for VISION_START")
+    cv2.imshow(PREVIEW_WINDOW_NAME, preview)
+    cv2.waitKey(1)
 
 
 def print_result_frame_debug(result: dict, responses: List[bytes], sequence: int) -> None:
@@ -110,71 +136,107 @@ def run_service(
     source: str,
     camera_device: int,
     output_dir: Path,
+    display: bool,
+    debug_view: bool,
 ) -> int:
     config = load_config(config_path)
     camera = open_camera(source, camera_device, DEFAULT_WIDTH, DEFAULT_HEIGHT)
     parser = FrameParser()
     last_sequence = None
     last_response: List[bytes] = []
+    cached_sequence = None
+    cached_responses: List[bytes] = []
+    last_preview_time = 0.0
 
     print(f"视觉串口服务已启动：{serial_device} @ {baudrate}")
     print("等待 Gimbal1 的 VISION_START...")
+    if display:
+        cv2.namedWindow(PREVIEW_WINDOW_NAME, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(PREVIEW_WINDOW_NAME, 1000, 750)
     try:
         with serial.Serial(serial_device, baudrate=baudrate, timeout=0.05) as port:
             while True:
+                if display and (time.monotonic() - last_preview_time) >= 0.08:
+                    preview_frame = camera.read()
+                    show_preview(preview_frame, config, debug_view)
+                    last_preview_time = time.monotonic()
+
                 received = port.read(128)
                 if not received:
                     continue
                 for frame in parser.feed(received):
-                    if frame.command != VISION_START:
-                        continue
                     sequence, piece_count, piece_index = decode_flags(frame.flags)
-                    del piece_count, piece_index
-                    if last_sequence == sequence and last_response:
-                        for response in last_response:
-                            port.write(response)
-                        port.flush()
-                        print(f"重复任务 {sequence}，已重发缓存结果")
+
+                    if frame.command == VISION_START:
+                        del piece_count, piece_index
+                        if cached_sequence == sequence and cached_responses:
+                            port.write(cached_responses[0])
+                            port.flush()
+                            print(f"重复任务 {sequence}，已重发第 0 块结果")
+                            continue
+
+                        print(f"收到任务 {sequence}，开始采图和识别")
+                        responses: List[bytes]
+                        try:
+                            try:
+                                parameters = ScaraParameters.from_config(config)
+                            except KinematicsError as error:
+                                if "尚未配置" in str(error):
+                                    raise ValueError(str(error)) from error
+                                raise
+                            image = camera.read()
+                            result, _ = process_frame(image, config, output_dir)
+                            if result.get("status") != "ok":
+                                responses = []
+                                print(f"任务 {sequence} 失败：{result['message']}")
+                            else:
+                                responses = make_result_frames(result, sequence, parameters)
+                                if RESULT_FRAME_LIMIT > 0:
+                                    responses = responses[:RESULT_FRAME_LIMIT]
+                                print(f"任务 {sequence} 成功，缓存 {len(responses)} 个碎片结果帧")
+                                print_result_frame_debug(result, responses, sequence)
+                        except KinematicsError as error:
+                            responses = []
+                            print(f"任务 {sequence} 逆运动学失败：{error}")
+                        except (KeyError, ValueError, TypeError) as error:
+                            responses = []
+                            print(f"任务 {sequence} 配置或结果错误：{error}")
+
+                        cached_sequence = sequence
+                        cached_responses = responses
+                        if responses:
+                            port.write(responses[0])
+                            port.flush()
+                            print(f"任务 {sequence} 已发送第 0 块结果")
+                        if display:
+                            result_image = cv2.imread(str(output_dir / "latest_result.jpg"))
+                            if result_image is not None:
+                                cv2.namedWindow(RESULT_WINDOW_NAME, cv2.WINDOW_NORMAL)
+                                cv2.resizeWindow(RESULT_WINDOW_NAME, 1200, 800)
+                                cv2.imshow(RESULT_WINDOW_NAME, result_image)
+                                cv2.waitKey(1)
+                        last_sequence = sequence
+                        last_response = responses
                         continue
 
-                    print(f"收到任务 {sequence}，开始采图和识别")
-                    responses: List[bytes]
-                    try:
-                        try:
-                            parameters = ScaraParameters.from_config(config)
-                        except KinematicsError as error:
-                            if "尚未配置" in str(error):
-                                raise ValueError(str(error)) from error
-                            raise
-                        image = camera.read()
-                        result, _ = process_frame(image, config, output_dir)
-                        if result.get("status") != "ok":
-                            responses = []
-                            print(f"任务 {sequence} 失败：{result['message']}")
-                        else:
-                            responses = make_result_frames(result, sequence, parameters)
-                            if RESULT_FRAME_LIMIT > 0:
-                                responses = responses[:RESULT_FRAME_LIMIT]
-                            print(f"任务 {sequence} 成功，发送 {len(responses)} 个碎片结果帧")
-                            print_result_frame_debug(result, responses, sequence)
-                    except KinematicsError as error:
-                        responses = []
-                        print(f"任务 {sequence} 逆运动学失败：{error}")
-                    except (KeyError, ValueError, TypeError) as error:
-                        responses = []
-                        print(f"任务 {sequence} 配置或结果错误：{error}")
-                    for index, response in enumerate(responses):
-                        port.write(response)
-                        if index + 1 < len(responses):
-                            time.sleep(RESULT_FRAME_GAP_S)
-                    port.flush()
-                    last_sequence = sequence
-                    last_response = responses
+                    if frame.command == VISION_NEXT:
+                        del piece_count
+                        if cached_sequence != sequence or not cached_responses:
+                            print(f"收到 NEXT 但没有匹配缓存：seq={sequence}, index={piece_index}")
+                            continue
+                        if piece_index >= len(cached_responses):
+                            print(f"收到越界 NEXT：seq={sequence}, index={piece_index}, total={len(cached_responses)}")
+                            continue
+                        port.write(cached_responses[piece_index])
+                        port.flush()
+                        print(f"任务 {sequence} 已发送第 {piece_index} 块结果")
     except KeyboardInterrupt:
         print("视觉串口服务已停止")
         return 0
     finally:
         camera.close()
+        if display:
+            cv2.destroyAllWindows()
 
 
 def main() -> int:
@@ -185,6 +247,8 @@ def main() -> int:
     parser.add_argument("--source", choices=("auto", "picamera2", "usb"), default="picamera2")
     parser.add_argument("--device", type=int, default=0, help="USB 摄像头编号")
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).with_name("output"))
+    parser.add_argument("--display", action="store_true", help="串口服务运行时显示实时预览")
+    parser.add_argument("--debug-view", action="store_true", help="显示四宫格调试画面而不是普通预览")
     args = parser.parse_args()
     try:
         return run_service(
@@ -194,6 +258,8 @@ def main() -> int:
             args.source,
             args.device,
             args.output_dir,
+            args.display,
+            args.debug_view,
         )
     except (OSError, RuntimeError, ValueError) as error:
         print(f"视觉串口服务启动失败：{error}", file=sys.stderr)

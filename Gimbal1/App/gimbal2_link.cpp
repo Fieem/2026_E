@@ -1,5 +1,6 @@
 #include "gimbal2_link.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -16,6 +17,26 @@ char frame_buf[GIMBAL2_LINK_FRAME_MAX_LEN];
 uint8_t frame_len = 0U;
 
 Gimbal2LinkStatus link_status{};
+
+bool formatFixed3(char *buffer, size_t buffer_size, float value) {
+    if (buffer == nullptr || buffer_size == 0U || !std::isfinite(value)) {
+        return false;
+    }
+
+    const long scaled = std::lround(static_cast<double>(value) * 1000.0);
+    const long abs_scaled = scaled >= 0 ? scaled : -scaled;
+    const long integer_part = abs_scaled / 1000L;
+    const long fractional_part = abs_scaled % 1000L;
+
+    const int length = std::snprintf(
+        buffer,
+        buffer_size,
+        "%s%ld.%03ld",
+        scaled < 0 ? "-" : "",
+        integer_part,
+        fractional_part);
+    return length > 0 && length < static_cast<int>(buffer_size);
+}
 
 bool ringPop(uint8_t *out) {
     if (out == nullptr || rx_tail == rx_head) {
@@ -164,9 +185,15 @@ extern "C" bool Gimbal2Link_ClearFlags(void) {
 
 extern "C" bool Gimbal2Link_SendTask(const float angle1, const float angle2) {
     char buffer[64];
+    char angle1_text[24];
+    char angle2_text[24];
+    if (!formatFixed3(angle1_text, sizeof(angle1_text), angle1) ||
+        !formatFixed3(angle2_text, sizeof(angle2_text), angle2)) {
+        return false;
+    }
+
     const int length = std::snprintf(
-        buffer, sizeof(buffer), "TASK,%.3f,%.3f\n",
-        static_cast<double>(angle1), static_cast<double>(angle2));
+        buffer, sizeof(buffer), "TASK,%s,%s\n", angle1_text, angle2_text);
     if (length <= 0 || length >= static_cast<int>(sizeof(buffer))) return false;
 
     return HAL_UART_Transmit(

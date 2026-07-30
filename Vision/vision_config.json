@@ -32,7 +32,7 @@
   },
   "segmentation": {
     "mode": "light_on_dark",
-    "threshold": 100,
+    "threshold": 80,
     "blur_size": 5,
     "morphology_mm": 0.8,
     "polygon_epsilon_mm": 1.2,
@@ -48,12 +48,12 @@
     "camera_to_base": {
       "rotation_rad": -1.5708,
       "tx_mm": -120.0,
-      "ty_mm": 268.5
+      "ty_mm": 275.5
     },
     "j1_zero_offset_rad": 0.0,
     "j2_zero_offset_rad": 0.0,
     "j1_direction": -1,
-    "j2_direction": 1,
+    "j2_direction": -1,
     "j1_min_rad": -3.1416,
     "j1_max_rad": 3.1416,
     "j2_min_rad": -3.1416,

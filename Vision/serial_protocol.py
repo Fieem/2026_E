@@ -14,6 +14,7 @@ MAX_PAYLOAD_BYTES = 4 + MAX_FLOATS * 4
 VISION_START = 0x0201
 VISION_RESULT = 0x0202
 VISION_ERROR = 0x0203
+VISION_NEXT = 0x0204
 
 ERROR_FRAGMENT_COUNT = 1
 ERROR_NO_SOLUTION = 2
@@ -62,6 +63,10 @@ def decode_flags(flags: int):
 
 def pack_start(sequence: int) -> bytes:
     return _pack_frame(VISION_START, encode_flags(sequence), [])
+
+
+def pack_next(sequence: int, piece_index: int) -> bytes:
+    return _pack_frame(VISION_NEXT, encode_flags(sequence, 0, piece_index), [])
 
 
 def pack_result(

@@ -349,6 +349,54 @@ def _angle_wrap(angle: float) -> float:
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
+def _rotate_about(point: Pt, center: Pt, angle: float) -> Pt:
+    return point.sub(center).rotate(angle).add(center)
+
+
+def _normalize_rectangle_pose(
+    rectangle: Dict,
+    poses: Dict[int, Tuple[float, Pt]],
+    world_polygons: Dict[int, List[Pt]],
+) -> Tuple[Dict, Dict[int, Tuple[float, Pt]], Dict[int, List[Pt]]]:
+    """把最终矩形摆正到：长边平行 X，短边平行 Y。"""
+
+    width = float(rectangle["width"])
+    height = float(rectangle["height"])
+    center = rectangle["center"]
+
+    long_side_angle = rectangle["angle"] if width >= height else rectangle["angle"] + math.pi * 0.5
+    normalize_angle = -_angle_wrap(long_side_angle)
+
+    normalized_rectangle = dict(rectangle)
+    long_side = max(width, height)
+    short_side = min(width, height)
+    normalized_rectangle["width"] = long_side
+    normalized_rectangle["height"] = short_side
+    normalized_rectangle["angle"] = 0.0
+    half_long = long_side * 0.5
+    half_short = short_side * 0.5
+    normalized_rectangle["corners"] = [
+        center.add(Pt(-half_long, -half_short)),
+        center.add(Pt(half_long, -half_short)),
+        center.add(Pt(half_long, half_short)),
+        center.add(Pt(-half_long, half_short)),
+    ]
+
+    normalized_poses: Dict[int, Tuple[float, Pt]] = {}
+    normalized_polygons: Dict[int, List[Pt]] = {}
+    for piece_index, (angle, piece_center) in poses.items():
+        normalized_poses[piece_index] = (
+            _angle_wrap(angle + normalize_angle),
+            _rotate_about(piece_center, center, normalize_angle),
+        )
+        normalized_polygons[piece_index] = [
+            _rotate_about(point, center, normalize_angle)
+            for point in world_polygons[piece_index]
+        ]
+
+    return normalized_rectangle, normalized_poses, normalized_polygons
+
+
 def _align_opposite_edges(
     fixed_start: Pt,
     fixed_end: Pt,
@@ -823,12 +871,17 @@ def find_rectangle_solution(
         return None
 
     rectangle = best_solution["rectangle"]
+    rectangle, normalized_poses, normalized_world_polygons = _normalize_rectangle_pose(
+        rectangle,
+        best_solution["poses"],
+        best_solution["world_polygons"],
+    )
     desired_center = target_center if target_center is not None else rectangle["center"]
     shift = desired_center.sub(rectangle["center"])
 
     placements = []
     for piece in prepared:
-        angle, center = best_solution["poses"][piece["index"]]
+        angle, center = normalized_poses[piece["index"]]
         shifted_center = center.add(shift)
         source_orientation = piece["source_orientation"]
         placements.append(
@@ -842,7 +895,7 @@ def find_rectangle_solution(
                 "target_orientation": _angle_wrap(source_orientation + angle),
                 "target_pts": [
                     point.add(shift)
-                    for point in best_solution["world_polygons"][piece["index"]]
+                    for point in normalized_world_polygons[piece["index"]]
                 ],
             }
         )

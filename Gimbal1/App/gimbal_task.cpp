@@ -194,6 +194,13 @@ void finishSequence(void) {
 void startExecution(const ScaraVisionResult &result, uint32_t now_ms) {
     execute_result = result;
     execute_piece_index = 0U;
+    while (execute_piece_index < execute_result.expected_piece_count &&
+           (execute_result.received_mask & (1U << execute_piece_index)) != 0U) {
+        ++execute_piece_index;
+    }
+    if (execute_piece_index > 0U) {
+        --execute_piece_index;
+    }
     Gimbal2Link_ClearFlags();
     startExecuteStage(ExecuteState::MoveJ1ToPick, now_ms);
 }
@@ -248,7 +255,6 @@ void updateExecution(uint32_t now_ms) {
 
     case ExecuteState::MoveJ1ToPick:
         Gimbal2Link_ClearFlags();
-        Gimbal2Link_ClearFlags();
         if (!Gimbal2Link_SendTask(
                 radToDegrees(pose.pick_j2_rad),
                 radToDegrees(pose.pick_wrist_rad))) {
@@ -288,11 +294,17 @@ void updateExecution(uint32_t now_ms) {
     case ExecuteState::WaitGimbal2Finish:
         if (!gimbal2_status.finish_flag) break;
         Gimbal2Link_ClearFlags();
-        ++execute_piece_index;
-        if (execute_piece_index >= execute_result.expected_piece_count) {
+        if ((execute_piece_index + 1U) >= execute_result.expected_piece_count) {
             finishSequence();
         } else {
-            startExecuteStage(ExecuteState::MoveJ1ToPick, now_ms);
+            execute_result = ScaraVisionResult{};
+            execute_piece_index = 0U;
+            execute_stage_started_tick = 0U;
+            execute_state = ExecuteState::Idle;
+            if (!Vision_RequestNext()) {
+                enterFault();
+                return;
+            }
         }
         break;
     }
