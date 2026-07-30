@@ -70,16 +70,14 @@ static void comm_pi_parse_line(const char *line)
     if (cmd == NULL) return;
 
     if (strcmp_upper(cmd, "TASK") == 0) {
-        /* TASK,<dist_x>,<angle1>,<angle2> */
+        /* TASK,<angle1>,<angle2> */
         char *a1 = strtok_r(NULL, ",", &saveptr);
         char *a2 = strtok_r(NULL, ",", &saveptr);
-        char *a3 = strtok_r(NULL, ",", &saveptr);
-        if (a1 && a2 && a3) {
-            comm_dist_x = (float)atof(a1);
-            comm_angle1 = (float)atof(a2);
-            comm_angle2 = (float)atof(a3);
+        if (a1 && a2) {
+            comm_angle1 = (float)atof(a1);
+            comm_angle2 = (float)atof(a2);
             comm_task_ready = true;
-            printsf(0, "TASK dist=%.1f a1=%.3f a2=%.3f", comm_dist_x, comm_angle1, comm_angle2);
+            printsf(0, "TASK %.3f %.3f", comm_angle1, comm_angle2);
         } else {
             printsf(0, "TASK PARAM");
         }
