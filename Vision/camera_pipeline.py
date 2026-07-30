@@ -22,7 +22,8 @@ import cv2
 import numpy as np
 
 from algorithm import Pt, find_rectangle_solution, polygon_area
-from texture_scorer import TextureScorer
+from jqk_template_matcher import match_card_to_templates
+from texture_scorer import TextureScorer, solve_with_texture
 
 
 DEFAULT_WIDTH = 1600
@@ -33,6 +34,7 @@ COLORS = [
     (113, 204, 46),
     (18, 156, 243),
 ]
+VALID_PIECE_MODES = {"plain", "playing_cards"}
 
 
 @dataclass
@@ -72,12 +74,60 @@ def load_config(path: Path) -> Dict:
         raise ValueError("solver.local_overlap_step_mm 必须大于零")
     if int(config.get("solver", {}).get("local_overlap_max_iterations", 8)) < 0:
         raise ValueError("solver.local_overlap_max_iterations 不能小于零")
+    piece_mode = str(config.get("piece_mode", "plain"))
+    if piece_mode not in VALID_PIECE_MODES:
+        raise ValueError("piece_mode 只能是 plain 或 playing_cards")
     texture = config.get("texture", {})
     if float(texture.get("strip_width_mm", 5.0)) <= 0.0:
         raise ValueError("texture.strip_width_mm 必须大于零")
     if float(texture.get("lambda_texture", 0.5)) < 0.0:
         raise ValueError("texture.lambda_texture 不能小于零")
+    jqk_template = config.get("jqk_template", {})
+    if int(jqk_template.get("canvas_width_px", 256)) <= 0:
+        raise ValueError("jqk_template.canvas_width_px 必须大于零")
+    if int(jqk_template.get("canvas_height_px", 384)) <= 0:
+        raise ValueError("jqk_template.canvas_height_px 必须大于零")
+    if int(jqk_template.get("candidate_top_k", 7)) <= 0:
+        raise ValueError("jqk_template.candidate_top_k 必须大于零")
+    if float(jqk_template.get("min_confidence", 0.62)) < 0.0:
+        raise ValueError("jqk_template.min_confidence 不能小于零")
+    orientations = jqk_template.get("match_orientations_deg", [0, 180])
+    if not orientations:
+        raise ValueError("jqk_template.match_orientations_deg 不能为空")
+    for orientation_deg in orientations:
+        if int(orientation_deg) % 360 not in (0, 180):
+            raise ValueError("jqk_template.match_orientations_deg 目前只支持 0 或 180")
     return config
+
+
+def get_piece_mode(config: Dict) -> str:
+    """返回当前碎片模式。"""
+
+    piece_mode = str(config.get("piece_mode", "plain"))
+    return piece_mode if piece_mode in VALID_PIECE_MODES else "plain"
+
+
+def texture_pipeline_enabled(config: Dict) -> bool:
+    """仅在扑克牌模式下启用纹理评分流程。"""
+
+    if get_piece_mode(config) != "playing_cards":
+        return False
+    return bool(config.get("texture", {}).get("enabled", True))
+
+
+def jqk_template_enabled(config: Dict) -> bool:
+    """仅在扑克牌模式下启用 J/Q/K 模板重排。"""
+
+    if get_piece_mode(config) != "playing_cards":
+        return False
+    return bool(config.get("jqk_template", {}).get("enabled", False))
+
+
+def resolve_vision_relative_path(path_text: str) -> Path:
+    """将配置中的相对路径解析到 Vision 目录。"""
+
+    path = Path(path_text)
+    return path if path.is_absolute() else Path(__file__).resolve().parent / path
 
 
 def save_config(path: Path, config: Dict) -> None:
@@ -267,13 +317,102 @@ def _line_intersection(
     return first_start + ratio * first_direction
 
 
+def _merge_rounded_corner_vertices(
+    points_mm: np.ndarray,
+    min_turn_deg: float,
+    max_corner_extension_mm: float,
+) -> np.ndarray:
+    """把圆角轮廓产生的连续小转角合并为一个理论角点。"""
+
+    points = [np.asarray(point, dtype=np.float64) for point in points_mm]
+    if len(points) < 5:
+        return np.asarray(points, dtype=np.float64)
+
+    # 先把环形列表旋转到一个非圆角位置，避免圆角刚好跨过数组首尾。
+    turns: List[Tuple[float, float]] = []
+    for index in range(len(points)):
+        previous = points[(index - 1) % len(points)]
+        current = points[index]
+        following = points[(index + 1) % len(points)]
+        incoming = current - previous
+        outgoing = following - current
+        if np.linalg.norm(incoming) <= 1e-9 or np.linalg.norm(outgoing) <= 1e-9:
+            turns.append((0.0, 0.0))
+            continue
+        cross = float(incoming[0] * outgoing[1] - incoming[1] * outgoing[0])
+        dot = float(np.dot(incoming, outgoing))
+        turns.append((abs(math.degrees(math.atan2(cross, dot))), math.copysign(1.0, cross)))
+
+    non_round = [
+        index
+        for index, (angle, _) in enumerate(turns)
+        if angle < min_turn_deg or angle > 70.0
+    ]
+    if not non_round:
+        return np.asarray(points, dtype=np.float64)
+    start = non_round[0]
+    points = points[start:] + points[:start]
+
+    # 一次合并一个连续弧段，合并后重新计算，避免索引错位。
+    for _ in range(3):
+        if len(points) < 5:
+            break
+        run_start: Optional[int] = None
+        run_sign = 0.0
+        run_end = -1
+        for index in range(1, len(points) - 1):
+            previous = points[index - 1]
+            current = points[index]
+            following = points[index + 1]
+            incoming = current - previous
+            outgoing = following - current
+            if np.linalg.norm(incoming) <= 1e-9 or np.linalg.norm(outgoing) <= 1e-9:
+                angle = 0.0
+                sign = 0.0
+            else:
+                cross = float(incoming[0] * outgoing[1] - incoming[1] * outgoing[0])
+                dot = float(np.dot(incoming, outgoing))
+                angle = abs(math.degrees(math.atan2(cross, dot)))
+                sign = math.copysign(1.0, cross)
+            is_round_turn = min_turn_deg <= angle <= 70.0
+            if is_round_turn and (run_start is None or sign == run_sign):
+                if run_start is None:
+                    run_start = index
+                    run_sign = sign
+                run_end = index
+                continue
+            if run_start is not None and run_end - run_start + 1 >= 2:
+                break
+            run_start = None
+            run_end = -1
+
+        if run_start is None or run_end - run_start + 1 < 2:
+            break
+        corner = _line_intersection(
+            points[run_start - 1],
+            points[run_start],
+            points[run_end],
+            points[run_end + 1],
+        )
+        if corner is None:
+            break
+        if max(
+            float(np.linalg.norm(corner - points[run_start])),
+            float(np.linalg.norm(corner - points[run_end])),
+        ) > max_corner_extension_mm:
+            break
+        points = points[:run_start] + [corner] + points[run_end + 1:]
+
+    return np.asarray(points, dtype=np.float64)
+
+
 def _regularize_polygon(
     points_mm: np.ndarray,
     short_edge_mm: float,
-    collinear_angle_deg: float,
+    merge_angle_deg: float,
     max_corner_extension_mm: float,
 ) -> np.ndarray:
-    """删除短边伪顶点，并合并接近共线的相邻边。"""
+    """删除短边伪顶点，并按夹角合并接近共线的相邻边。"""
 
     points = [np.asarray(point, dtype=np.float64) for point in points_mm]
     if len(points) < 3:
@@ -316,8 +455,7 @@ def _regularize_polygon(
             if index != next_index
         ]
 
-    # 轮廓方向上的转角接近 0°，说明两段实际上属于同一条边。
-    # 这里的角度是两条相邻边沿轮廓方向的转角，不是多边形内角。
+    # 两条边的夹角接近 180°，说明这两段实际上属于同一条边。
     while len(points) > 3:
         removed = False
         for index in range(len(points)):
@@ -333,7 +471,9 @@ def _regularize_polygon(
             dot = float(np.dot(incoming, outgoing))
             cross = float(incoming[0] * outgoing[1] - incoming[1] * outgoing[0])
             turn_deg = abs(math.degrees(math.atan2(cross, dot)))
-            if dot > 0.0 and turn_deg <= collinear_angle_deg:
+            interior_angle_deg = 180.0 - turn_deg
+
+            if interior_angle_deg >= merge_angle_deg:
                 points.pop(index)
                 removed = True
                 break
@@ -348,26 +488,131 @@ def simplify_contour(
     pixels_per_mm: float,
     base_epsilon_mm: float,
     short_edge_mm: float = 2.0,
-    collinear_angle_deg: float = 8.0,
+    merge_angle_deg: float = 170.0,
     max_corner_extension_mm: float = 20.0,
+    max_epsilon_mm: float = 5.0,
+    rounded_corner_enabled: bool = False,
+    rounded_corner_min_turn_deg: float = 6.0,
 ) -> Optional[np.ndarray]:
     """将轮廓简化为 3～5 个角点，并修复短边和近共线伪顶点。"""
 
-    for epsilon_mm in np.linspace(base_epsilon_mm, 5.0, 15):
+    epsilon_end_mm = max(float(base_epsilon_mm), float(max_epsilon_mm))
+    for epsilon_mm in np.linspace(base_epsilon_mm, epsilon_end_mm, 15):
         epsilon_px = max(1.0, float(epsilon_mm) * pixels_per_mm)
         polygon = cv2.approxPolyDP(contour, epsilon_px, True).reshape(-1, 2)
         if len(polygon) < 3:
             break
         points_mm = polygon.astype(np.float64) / float(pixels_per_mm)
+        if rounded_corner_enabled:
+            points_mm = _merge_rounded_corner_vertices(
+                points_mm,
+                max(0.1, float(rounded_corner_min_turn_deg)),
+                max(0.1, float(max_corner_extension_mm)),
+            )
         regularized_mm = _regularize_polygon(
             points_mm,
             max(0.1, float(short_edge_mm)),
-            max(0.1, float(collinear_angle_deg)),
+            float(np.clip(merge_angle_deg, 90.0, 179.9)),
             max(0.1, float(max_corner_extension_mm)),
         )
         if 3 <= len(regularized_mm) <= 5:
             return regularized_mm * float(pixels_per_mm)
     return None
+
+
+def classify_playing_card_colors(
+    corrected: np.ndarray,
+    segmentation: Dict,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """返回扑克牌前景候选掩膜和深蓝背景模型掩膜。"""
+
+    height = corrected.shape[0]
+    row_profile = np.median(corrected.astype(np.float32), axis=1)
+    row_profile = cv2.GaussianBlur(
+        row_profile.reshape(height, 1, 3), (1, 41), 0
+    ).reshape(height, 3)
+    color_distance = np.linalg.norm(
+        corrected.astype(np.float32) - row_profile[:, None, :], axis=2
+    )
+    background_threshold = float(
+        segmentation.get("background_distance_threshold", 28.0)
+    )
+
+    hsv = cv2.cvtColor(corrected, cv2.COLOR_BGR2HSV)
+    bottom_start = int(height * 0.65)
+    reference = hsv[bottom_start:]
+    reference = reference[reference[:, :, 1] >= 45]
+    if len(reference) >= 100:
+        reference_hue = reference[:, 0].astype(np.float32)
+        angles = reference_hue * (2.0 * math.pi / 180.0)
+        hue_mean = math.atan2(
+            float(np.sin(angles).mean()), float(np.cos(angles).mean())
+        )
+        if hue_mean < 0.0:
+            hue_mean += 2.0 * math.pi
+        background_hue = hue_mean * 180.0 / (2.0 * math.pi)
+        background_saturation = float(np.median(reference[:, 1]))
+        background_value = float(np.median(reference[:, 2]))
+    else:
+        background_hue = 105.0
+        background_saturation = 120.0
+        background_value = 130.0
+
+    hue_tolerance = float(segmentation.get("blue_hue_tolerance_deg", 28.0))
+    saturation_floor = float(
+        segmentation.get(
+            "blue_background_min_saturation",
+            max(45.0, background_saturation * 0.35),
+        )
+    )
+    value_margin = float(
+        segmentation.get("blue_background_value_margin", 85.0)
+    )
+    hue_distance = np.abs(hsv[:, :, 0].astype(np.float32) - background_hue)
+    hue_distance = np.minimum(hue_distance, 180.0 - hue_distance)
+    blue_background = (
+        (hue_distance <= hue_tolerance)
+        & (hsv[:, :, 1].astype(np.float32) >= saturation_floor)
+        & (
+            hsv[:, :, 2].astype(np.float32)
+            <= background_value + value_margin
+        )
+    )
+    foreground = (color_distance >= background_threshold) & (~blue_background)
+    return foreground.astype(np.uint8) * 255, blue_background.astype(np.uint8) * 255
+
+
+def extract_playing_card_pattern_masks(
+    corrected: np.ndarray,
+    foreground_mask: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """提取扑克牌中的红色和黑色花纹掩膜。"""
+
+    hsv = cv2.cvtColor(corrected, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(corrected, cv2.COLOR_BGR2GRAY)
+    valid = foreground_mask > 0
+
+    hue = hsv[:, :, 0].astype(np.int16)
+    saturation = hsv[:, :, 1].astype(np.uint8)
+    value = hsv[:, :, 2].astype(np.uint8)
+
+    # 红色牌面在实际拍摄里常会因为阴影、反光和透视边缘导致饱和度下降，
+    # 因此这里对红色色相范围放宽一些，同时降低最小饱和度和亮度门槛。
+    red_mask = (
+        (((hue <= 18) | (hue >= 160)) & (saturation >= 40) & (value >= 25) & valid)
+        .astype(np.uint8)
+        * 255
+    )
+    black_mask = (
+        ((gray <= 118) & (value <= 150) & (~(red_mask > 0)) & valid).astype(np.uint8)
+        * 255
+    )
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
+    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
+    black_mask = cv2.morphologyEx(black_mask, cv2.MORPH_OPEN, kernel)
+    return red_mask, black_mask
 
 
 def segment_image(
@@ -376,37 +621,84 @@ def segment_image(
     pixels_per_mm: float,
     threshold_override: Optional[int] = None,
     morphology_override: Optional[float] = None,
+    card_open_override: Optional[float] = None,
+    card_close_override: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """生成灰度图和二值图，调试窗口与正式检测共用这一套逻辑。"""
 
     segmentation = config["segmentation"]
     gray = cv2.cvtColor(corrected, cv2.COLOR_BGR2GRAY)
-    blur_size = int(segmentation.get("blur_size", 5))
-    blur_size = max(3, blur_size | 1)
-    blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
 
-    mode = segmentation.get("mode", "light_on_dark")
-    threshold_value = (
-        int(segmentation.get("threshold", 0))
-        if threshold_override is None
-        else int(threshold_override)
-    )
-    threshold_type = cv2.THRESH_BINARY if mode == "light_on_dark" else cv2.THRESH_BINARY_INV
-    if threshold_value <= 0:
-        threshold_type |= cv2.THRESH_OTSU
-    _, mask = cv2.threshold(blurred, threshold_value, 255, threshold_type)
+    # 扑克牌碎片不能继续使用单一灰度阈值：红、蓝、黑色印刷会把一块
+    # 完整碎片切成很多孔洞。扑克牌模式改为估计深蓝背景，再按颜色距离
+    # 分割，这样白底、彩色牌面和黑色图案都会被视为同一块前景。
+    if get_piece_mode(config) == "playing_cards":
+        mask, _ = classify_playing_card_colors(corrected, segmentation)
+    else:
+        blur_size = int(segmentation.get("blur_size", 5))
+        blur_size = max(3, blur_size | 1)
+        blurred = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
+
+        mode = segmentation.get("mode", "light_on_dark")
+        threshold_value = (
+            int(segmentation.get("threshold", 0))
+            if threshold_override is None
+            else int(threshold_override)
+        )
+        threshold_type = cv2.THRESH_BINARY if mode == "light_on_dark" else cv2.THRESH_BINARY_INV
+        if threshold_value <= 0:
+            threshold_type |= cv2.THRESH_OTSU
+        _, mask = cv2.threshold(blurred, threshold_value, 255, threshold_type)
+
+    def build_kernel(size_mm: float) -> np.ndarray:
+        kernel_size = max(3, round(float(size_mm) * pixels_per_mm))
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        return cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+        )
 
     morphology_mm = (
         float(segmentation.get("morphology_mm", 0.8))
         if morphology_override is None
         else float(morphology_override)
     )
-    kernel_size = max(3, round(morphology_mm * pixels_per_mm))
-    if kernel_size % 2 == 0:
-        kernel_size += 1
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    if get_piece_mode(config) == "playing_cards":
+        card_open_mm = (
+            float(segmentation.get("playing_card_noise_open_mm", morphology_mm))
+            if card_open_override is None
+            else float(card_open_override)
+        )
+        card_close_mm = (
+            float(segmentation.get("playing_card_hole_close_mm", morphology_mm))
+            if card_close_override is None
+            else float(card_close_override)
+        )
+        if card_open_mm > 0.0:
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, build_kernel(card_open_mm))
+        if card_close_mm > 0.0:
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, build_kernel(card_close_mm))
+
+        # 先去除小的孤立前景噪声，再交给面积和轮廓阶段处理，避免
+        # 反光点、背景纹理或牌面残留形成额外候选轮廓。
+        minimum_component_mm2 = float(
+            segmentation.get("foreground_component_min_area_mm2", 30.0)
+        )
+        minimum_component_px = max(
+            16, round(minimum_component_mm2 * pixels_per_mm * pixels_per_mm)
+        )
+        labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        cleaned = np.zeros_like(mask)
+        for label in range(1, labels_count):
+            if stats[label, cv2.CC_STAT_AREA] >= minimum_component_px:
+                cleaned[labels == label] = 255
+        mask = cleaned
+    else:
+        kernel = build_kernel(morphology_mm)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
     return gray, mask
 
 
@@ -421,6 +713,80 @@ def restrict_mask_to_piece_search_area(
     split_y = margin_px + workspace_height_px // 2
     restricted[split_y:, :] = 0
     return restricted
+
+
+def split_touching_card_contours(
+    mask: np.ndarray,
+    pixels_per_mm: float,
+    polygon_epsilon_mm: float,
+) -> List[np.ndarray]:
+    """用距离变换和分水岭拆分相互接触的扑克牌碎片。
+
+    扑克牌模式下两块碎片可能只在边角处接触，外部轮廓会变成一个
+    6～8 边的凹多边形，直接拟合会把它整块丢弃。只有当轮廓明显
+    超过 5 个角点时才尝试拆分，避免把正常的三角形或四边形过分切开。
+    """
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    split_contours: List[np.ndarray] = []
+    epsilon_px = max(1.0, float(polygon_epsilon_mm) * pixels_per_mm)
+
+    for contour in contours:
+        approximation = cv2.approxPolyDP(contour, epsilon_px, True)
+        if len(approximation) <= 5:
+            split_contours.append(contour)
+            continue
+
+        x, y, width, height = cv2.boundingRect(contour)
+        padding = 4
+        local_width = width + padding * 2
+        local_height = height + padding * 2
+        local_contour = contour.reshape(-1, 2).astype(np.int32)
+        local_contour -= np.array([[x - padding, y - padding]], dtype=np.int32)
+        component = np.zeros((local_height, local_width), dtype=np.uint8)
+        cv2.fillPoly(component, [local_contour], 255)
+
+        distance = cv2.distanceTransform(component, cv2.DIST_L2, 5)
+        peak_limit = max(3.0, float(distance.max()) * 0.35)
+        peaks = np.where(distance >= peak_limit, 255, 0).astype(np.uint8)
+        peaks = cv2.morphologyEx(
+            peaks,
+            cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        )
+        marker_count, peak_markers = cv2.connectedComponents(peaks)
+        if marker_count <= 2:
+            split_contours.append(contour)
+            continue
+
+        # 标签 1 是外部背景，2、3……是每个距离峰对应的碎片。
+        markers = np.zeros((local_height, local_width), dtype=np.int32)
+        markers[component == 0] = 1
+        markers[peak_markers > 0] = peak_markers[peak_markers > 0] + 1
+        watershed_input = cv2.cvtColor(component, cv2.COLOR_GRAY2BGR)
+        cv2.watershed(watershed_input, markers)
+
+        separated: List[np.ndarray] = []
+        for label in range(2, marker_count + 1):
+            region = np.where(markers == label, 255, 0).astype(np.uint8)
+            region_contours, _ = cv2.findContours(
+                region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            if not region_contours:
+                continue
+            region_contour = max(region_contours, key=cv2.contourArea)
+            if cv2.contourArea(region_contour) < (pixels_per_mm * pixels_per_mm * 10.0):
+                continue
+            region_contour = region_contour.reshape(-1, 2).astype(np.int32)
+            region_contour += np.array([[x - padding, y - padding]], dtype=np.int32)
+            separated.append(region_contour.reshape(-1, 1, 2))
+
+        if len(separated) >= 2:
+            split_contours.extend(separated)
+        else:
+            split_contours.append(contour)
+
+    return split_contours
 
 
 def extract_piece_texture(
@@ -452,15 +818,42 @@ def detect_pieces(
     mask = restrict_mask_to_piece_search_area(mask, config, pixels_per_mm)
     segmentation = config["segmentation"]
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     minimum_area = float(segmentation["min_piece_area_mm2"])
     maximum_area = float(segmentation["max_piece_area_mm2"])
     epsilon_mm = float(segmentation["polygon_epsilon_mm"])
     short_edge_mm = float(segmentation.get("short_edge_mm", 2.0))
-    collinear_angle_deg = float(segmentation.get("collinear_angle_deg", 8.0))
+    merge_angle_deg = float(
+        segmentation.get(
+            "merge_angle_deg",
+            segmentation.get("collinear_angle_deg", 170.0),
+        )
+    )
     max_corner_extension_mm = float(
         segmentation.get("max_corner_extension_mm", 20.0)
     )
+    max_epsilon_mm = float(
+        segmentation.get(
+            "playing_card_max_polygon_epsilon_mm"
+            if get_piece_mode(config) == "playing_cards"
+            else "max_polygon_epsilon_mm",
+            12.0 if get_piece_mode(config) == "playing_cards" else 5.0,
+        )
+    )
+    rounded_corner_enabled = bool(
+        segmentation.get(
+            "rounded_corner_enabled",
+            get_piece_mode(config) == "playing_cards",
+        )
+    ) and get_piece_mode(config) == "playing_cards"
+    rounded_corner_min_turn_deg = float(
+        segmentation.get("rounded_corner_min_turn_deg", 6.0)
+    )
+    if get_piece_mode(config) == "playing_cards":
+        contours = split_touching_card_contours(mask, pixels_per_mm, epsilon_mm)
+    else:
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
     pieces: List[DetectedPiece] = []
     warnings: List[str] = []
 
@@ -473,8 +866,11 @@ def detect_pieces(
             pixels_per_mm,
             epsilon_mm,
             short_edge_mm,
-            collinear_angle_deg,
+            merge_angle_deg,
             max_corner_extension_mm,
+            max_epsilon_mm,
+            rounded_corner_enabled,
+            rounded_corner_min_turn_deg,
         )
         if polygon_px is None:
             warnings.append(f"忽略一个无法简化为 3～5 边形的轮廓，面积 {area_mm2:.1f} mm²")
@@ -656,6 +1052,246 @@ def create_fit_overlay(
     return overlay
 
 
+def _choose_affine_triangle(points: Sequence[Pt]) -> Optional[Tuple[int, int, int]]:
+    """从有序多边形中选出三个不共线顶点，用于纹理刚体变换。"""
+
+    best_triangle: Optional[Tuple[int, int, int]] = None
+    best_area = 0.0
+    for first in range(len(points)):
+        for second in range(first + 1, len(points)):
+            for third in range(second + 1, len(points)):
+                area = abs(
+                    (points[second].x - points[first].x)
+                    * (points[third].y - points[first].y)
+                    - (points[second].y - points[first].y)
+                    * (points[third].x - points[first].x)
+                )
+                if area > best_area:
+                    best_area = area
+                    best_triangle = (first, second, third)
+    return best_triangle if best_area > 1e-6 else None
+
+
+def _draw_textured_target_assembly(
+    after: np.ndarray,
+    pieces: Sequence[DetectedPiece],
+    solution: Dict,
+    pixels_per_mm: float,
+    config: Dict,
+) -> None:
+    """把每块检测到的真实纹理按求解位姿贴到目标布局中。"""
+
+    piece_by_index = {index: piece for index, piece in enumerate(pieces)}
+    height, width = after.shape[:2]
+    for placement in solution["placements"]:
+        index = int(placement["piece_index"])
+        piece = piece_by_index.get(index)
+        if (
+            piece is None
+            or piece.piece_image is None
+            or not piece.polygon_in_image
+        ):
+            continue
+
+        source_points = piece.polygon_in_image
+        # 求解器内部会将多边形顶点循环移位或反向规范化，因此不能
+        # 直接把 placement["target_pts"] 与原始纹理顶点按下标配对。
+        # 使用求解器输出的刚体角度、源中心和目标中心重新变换原始
+        # 观测顶点，保证纹理与几何轮廓一一对应。
+        source_center = placement["source_center"]
+        target_center = placement["target_center"]
+        angle = float(placement["angle"])
+        target_points_mm = [
+            point.sub(source_center).rotate(angle).add(target_center)
+            for point in piece.points_mm
+        ]
+        target_points = [
+            Pt(
+                float(point_mm_to_px(point, pixels_per_mm, config)[0]),
+                float(point_mm_to_px(point, pixels_per_mm, config)[1]),
+            )
+            for point in target_points_mm
+        ]
+        if len(source_points) != len(target_points):
+            continue
+        triangle = _choose_affine_triangle(source_points)
+        if triangle is None:
+            continue
+        source_triangle = np.array(
+            [[source_points[i].x, source_points[i].y] for i in triangle],
+            dtype=np.float32,
+        )
+        target_triangle = np.array(
+            [[target_points[i].x, target_points[i].y] for i in triangle],
+            dtype=np.float32,
+        )
+        matrix = cv2.getAffineTransform(source_triangle, target_triangle)
+
+        source_mask = np.zeros(piece.piece_image.shape[:2], dtype=np.uint8)
+        source_polygon = np.array(
+            [[round(point.x), round(point.y)] for point in source_points],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(source_mask, [source_polygon], 255)
+        warped_image = cv2.warpAffine(
+            piece.piece_image,
+            matrix,
+            (width, height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0),
+        )
+        warped_mask = cv2.warpAffine(
+            source_mask,
+            matrix,
+            (width, height),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        after[warped_mask > 0] = warped_image[warped_mask > 0]
+
+        target_polygon = np.array(
+            [[round(point.x), round(point.y)] for point in target_points],
+            dtype=np.int32,
+        )
+        cv2.polylines(after, [target_polygon], True, COLORS[index % len(COLORS)], 2, cv2.LINE_AA)
+        center = point_mm_to_px(placement["target_center"], pixels_per_mm, config)
+        cv2.putText(
+            after,
+            str(index),
+            center,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (20, 20, 20),
+            3,
+            cv2.LINE_AA,
+        )
+
+
+def create_solution_texture_canvas(
+    corrected: np.ndarray,
+    pieces: Sequence[DetectedPiece],
+    solution: Dict,
+    pixels_per_mm: float,
+    config: Dict,
+) -> np.ndarray:
+    """将求解后的真实碎片纹理贴到目标布局画布上。"""
+
+    canvas = np.full_like(corrected, 245)
+    _draw_textured_target_assembly(canvas, pieces, solution, pixels_per_mm, config)
+    return canvas
+
+
+def order_quad_points(points: np.ndarray) -> np.ndarray:
+    """将四边形顶点整理为 TL、TR、BR、BL。"""
+
+    if points.shape != (4, 2):
+        raise ValueError("四边形必须包含 4 个顶点")
+    sums = points.sum(axis=1)
+    diffs = np.diff(points, axis=1).reshape(-1)
+    ordered = np.zeros((4, 2), dtype=np.float32)
+    ordered[0] = points[np.argmin(sums)]
+    ordered[2] = points[np.argmax(sums)]
+    ordered[1] = points[np.argmin(diffs)]
+    ordered[3] = points[np.argmax(diffs)]
+    return ordered
+
+
+def render_solution_card_preview(
+    corrected: np.ndarray,
+    pieces: Sequence[DetectedPiece],
+    solution: Dict,
+    pixels_per_mm: float,
+    config: Dict,
+    canvas_width_px: int,
+    canvas_height_px: int,
+) -> Optional[np.ndarray]:
+    """把候选拼法渲染为标准化整牌图。"""
+
+    if solution is None:
+        return None
+    rectangle = solution.get("rectangle")
+    if not rectangle:
+        return None
+
+    try:
+        source_points = np.array(
+            [
+                point_mm_to_px(point, pixels_per_mm, config)
+                for point in rectangle["corners"]
+            ],
+            dtype=np.float32,
+        )
+        source_points = order_quad_points(source_points)
+    except (KeyError, ValueError, TypeError):
+        return None
+
+    assembly = create_solution_texture_canvas(
+        corrected,
+        pieces,
+        solution,
+        pixels_per_mm,
+        config,
+    )
+    short_px = min(int(canvas_width_px), int(canvas_height_px))
+    long_px = max(int(canvas_width_px), int(canvas_height_px))
+
+    if float(rectangle.get("width", 0.0)) >= float(rectangle.get("height", 0.0)):
+        destination = np.array(
+            [
+                [0.0, 0.0],
+                [long_px - 1.0, 0.0],
+                [long_px - 1.0, short_px - 1.0],
+                [0.0, short_px - 1.0],
+            ],
+            dtype=np.float32,
+        )
+        transform = cv2.getPerspectiveTransform(source_points, destination)
+        warped = cv2.warpPerspective(
+            assembly,
+            transform,
+            (long_px, short_px),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(255, 255, 255),
+        )
+        return cv2.rotate(warped, cv2.ROTATE_90_CLOCKWISE)
+
+    destination = np.array(
+        [
+            [0.0, 0.0],
+            [short_px - 1.0, 0.0],
+            [short_px - 1.0, long_px - 1.0],
+            [0.0, long_px - 1.0],
+        ],
+        dtype=np.float32,
+    )
+    transform = cv2.getPerspectiveTransform(source_points, destination)
+    return cv2.warpPerspective(
+        assembly,
+        transform,
+        (short_px, long_px),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255),
+    )
+
+
+def create_result_panel(
+    image: np.ndarray,
+    title: str,
+    target_size: Tuple[int, int],
+) -> np.ndarray:
+    """生成统一尺寸的结果面板。"""
+
+    if image.ndim == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if image.shape[1] != target_size[0] or image.shape[0] != target_size[1]:
+        image = cv2.resize(image, target_size, interpolation=cv2.INTER_AREA)
+    return add_panel_title(image, title)
+
+
 def create_result_image(
     corrected: np.ndarray,
     pieces: Sequence[DetectedPiece],
@@ -663,8 +1299,9 @@ def create_result_image(
     pixels_per_mm: float,
     message: str,
     config: Dict,
+    template_visuals: Optional[Dict] = None,
 ) -> np.ndarray:
-    """生成检测结果、目标布局和矩形拟合轮廓三栏对照图。"""
+    """生成检测结果、目标布局、拟合轮廓及模板匹配对照图。"""
 
     before = corrected.copy()
     after = np.full_like(corrected, 245)
@@ -675,27 +1312,52 @@ def create_result_image(
         cv2.putText(before, str(index), tuple(center), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (20, 20, 20), 3)
 
     if solution is not None:
+        _draw_textured_target_assembly(
+            after, pieces, solution, pixels_per_mm, config
+        )
         for placement in solution["placements"]:
             index = placement["piece_index"]
             polygon = np.array(
                 [point_mm_to_px(point, pixels_per_mm, config) for point in placement["target_pts"]],
                 dtype=np.int32,
             )
-            draw_polygon_with_alpha(after, polygon, COLORS[index % len(COLORS)], 0.72)
-            center = point_mm_to_px(placement["target_center"], pixels_per_mm, config)
-            cv2.putText(after, str(index), center, cv2.FONT_HERSHEY_SIMPLEX, 0.9, (20, 20, 20), 3)
+            cv2.polylines(after, [polygon], True, COLORS[index % len(COLORS)], 2, cv2.LINE_AA)
         rectangle = np.array(
             [point_mm_to_px(point, pixels_per_mm, config) for point in solution["rectangle"]["corners"]],
             dtype=np.int32,
         )
         cv2.polylines(after, [rectangle], True, (0, 0, 0), 5, cv2.LINE_AA)
 
-    before = add_panel_title(before, "DETECTED PIECES")
-    after = add_panel_title(after, "TARGET ASSEMBLY")
-    fit_overlay = add_panel_title(fit_overlay, "RECTANGLE FIT OVERLAY")
+    panel_size = (corrected.shape[1], corrected.shape[0])
+    before_panel = create_result_panel(before, "DETECTED PIECES", panel_size)
+    after_panel = create_result_panel(after, "TARGET ASSEMBLY - TEXTURE", panel_size)
+    fit_panel = create_result_panel(fit_overlay, "RECTANGLE FIT OVERLAY", panel_size)
 
-    separator = np.full((corrected.shape[0], 8, 3), 90, dtype=np.uint8)
-    combined = np.hstack((before, separator, after, separator.copy(), fit_overlay))
+    separator = np.full((before_panel.shape[0], 8, 3), 90, dtype=np.uint8)
+    top_row = np.hstack((before_panel, separator, after_panel, separator.copy(), fit_panel))
+    combined = top_row
+
+    if template_visuals:
+        card_preview = template_visuals.get("card_preview")
+        template_preview = template_visuals.get("template_preview")
+        mask_comparison = template_visuals.get("mask_comparison")
+        if (
+            isinstance(card_preview, np.ndarray)
+            and isinstance(template_preview, np.ndarray)
+            and isinstance(mask_comparison, np.ndarray)
+        ):
+            bottom_row = np.hstack(
+                (
+                    create_result_panel(card_preview, "ASSEMBLED CARD", panel_size),
+                    separator.copy(),
+                    create_result_panel(template_preview, "BEST JQK TEMPLATE", panel_size),
+                    separator.copy(),
+                    create_result_panel(mask_comparison, "RED / BLACK MASK COMPARE", panel_size),
+                )
+            )
+            row_separator = np.full((8, top_row.shape[1], 3), 90, dtype=np.uint8)
+            combined = np.vstack((top_row, row_separator, bottom_row))
+
     if solution is None:
         image_message = "DETECTION FAILED - see latest_result.json"
     else:
@@ -721,6 +1383,126 @@ def build_texture_pieces(pieces: Sequence[DetectedPiece]) -> List[Dict]:
     ]
 
 
+def rerank_solution_with_jqk_templates(
+    corrected: np.ndarray,
+    pieces: Sequence[DetectedPiece],
+    pixels_per_mm: float,
+    config: Dict,
+    solve_result: Dict,
+    diagnostics: Dict,
+) -> Optional[Tuple[Dict, Dict, Dict]]:
+    """使用 J/Q/K 模板对候选拼法做二次排序。"""
+
+    if not jqk_template_enabled(config):
+        diagnostics["template_enabled"] = False
+        return None
+
+    jqk_template = config.get("jqk_template", {})
+    template_dir = resolve_vision_relative_path(
+        str(jqk_template.get("template_dir", "templates/jqk"))
+    )
+    candidates = list(solve_result.get("candidates", []))
+    candidate_limit = max(1, int(jqk_template.get("candidate_top_k", 7)))
+    if not candidates:
+        diagnostics["template_enabled"] = True
+        diagnostics["template_error"] = "no_geometry_candidates"
+        return None
+
+    match_results: List[Dict] = []
+    for candidate_index, candidate in enumerate(candidates[:candidate_limit]):
+        solution = candidate.get("geometry")
+        if not isinstance(solution, dict):
+            continue
+        card_preview = render_solution_card_preview(
+            corrected,
+            pieces,
+            solution,
+            pixels_per_mm,
+            config,
+            int(jqk_template.get("canvas_width_px", 256)),
+            int(jqk_template.get("canvas_height_px", 384)),
+        )
+        if card_preview is None:
+            continue
+        match = match_card_to_templates(
+            card_preview,
+            template_dir,
+            canvas_width_px=int(jqk_template.get("canvas_width_px", 256)),
+            canvas_height_px=int(jqk_template.get("canvas_height_px", 384)),
+            match_orientations_deg=tuple(
+                int(value) for value in jqk_template.get("match_orientations_deg", [0, 180])
+            ),
+            center_weight=float(jqk_template.get("center_weight", 0.45)),
+            corner_weight=float(jqk_template.get("corner_weight", 0.25)),
+            red_weight=float(jqk_template.get("red_weight", 0.15)),
+            black_weight=float(jqk_template.get("black_weight", 0.15)),
+        )
+        match["candidate_index"] = candidate_index
+        match["geometry_score"] = float(candidate.get("j_shape", solution.get("score", 0.0)))
+        match["texture_rank_score"] = float(candidate.get("j_total", solution.get("score", 0.0)))
+        match["solution"] = solution
+        match_results.append(match)
+
+    diagnostics["template_enabled"] = True
+    if not match_results:
+        diagnostics["template_error"] = "no_template_match_result"
+        return None
+
+    valid_results = [match for match in match_results if "best_score" in match]
+    if not valid_results:
+        first = match_results[0]
+        diagnostics["template_error"] = first.get("error", "template_match_failed")
+        diagnostics["template_loaded_count"] = int(first.get("loaded_template_count", 0))
+        diagnostics["template_missing_files"] = first.get("missing_templates", [])
+        return None
+
+    valid_results.sort(key=lambda item: float(item.get("best_score", 0.0)), reverse=True)
+    best_match = valid_results[0]
+    second_score = float(valid_results[1].get("best_score", 0.0)) if len(valid_results) >= 2 else 0.0
+    score_margin = float(best_match.get("best_score", 0.0)) - second_score
+    min_confidence = float(jqk_template.get("min_confidence", 0.62))
+    fallback_to_texture = bool(jqk_template.get("fallback_to_texture", True))
+    fallback_triggered = fallback_to_texture and float(best_match.get("best_score", 0.0)) < min_confidence
+    applied = not fallback_triggered
+
+    template_info = {
+        "enabled": True,
+        "applied": applied,
+        "fallback_triggered": fallback_triggered,
+        "candidate_count": len(valid_results),
+        "template_best_name": str(best_match.get("best_name", "")),
+        "template_best_score": float(best_match.get("best_score", 0.0)),
+        "template_second_score": float(second_score),
+        "template_score_margin": float(score_margin),
+        "template_best_orientation_deg": int(best_match.get("best_orientation_deg", 0)),
+        "loaded_template_count": int(best_match.get("loaded_template_count", 0)),
+        "missing_templates": list(best_match.get("missing_templates", [])),
+        "template_candidate_scores": [
+            {
+                "candidate_index": int(match.get("candidate_index", 0)),
+                "template_name": str(match.get("best_name", "")),
+                "score": float(match.get("best_score", 0.0)),
+                "orientation_deg": int(match.get("best_orientation_deg", 0)),
+                "geometry_score": float(match.get("geometry_score", 0.0)),
+                "texture_rank_score": float(match.get("texture_rank_score", 0.0)),
+            }
+            for match in valid_results
+        ],
+    }
+    diagnostics["template_best_name"] = template_info["template_best_name"]
+    diagnostics["template_best_score"] = template_info["template_best_score"]
+    diagnostics["template_candidate_scores"] = template_info["template_candidate_scores"]
+    diagnostics["template_loaded_count"] = template_info["loaded_template_count"]
+    diagnostics["template_missing_files"] = template_info["missing_templates"]
+
+    template_visuals = {
+        "card_preview": best_match.get("card_preview"),
+        "template_preview": best_match.get("template_preview"),
+        "mask_comparison": best_match.get("mask_comparison"),
+    }
+    return best_match["solution"], template_info, template_visuals
+
+
 def score_solution_texture(
     solution: Dict,
     pieces: Sequence[DetectedPiece],
@@ -731,9 +1513,9 @@ def score_solution_texture(
 
     if not pieces:
         return None
-    texture = config.get("texture", {})
-    if not bool(texture.get("enabled", True)):
+    if not texture_pipeline_enabled(config):
         return None
+    texture = config.get("texture", {})
 
     scorer = TextureScorer(
         mm_per_px=float(texture.get("mm_per_px_override", pixels_per_mm)),
@@ -742,6 +1524,7 @@ def score_solution_texture(
         gw=float(texture.get("gradient_weight", 0.35)),
         nw=float(texture.get("ncc_weight", 0.30)),
         ow=float(texture.get("orb_weight", 0.35)),
+        pw=float(texture.get("pattern_weight", 0.45)),
     )
     texture_result = scorer.score_solution(solution, build_texture_pieces(pieces))
     texture_result["j_texture"] = 1.0 - float(texture_result.get("texture_score", 0.5))
@@ -750,6 +1533,106 @@ def score_solution_texture(
         texture_result,
     )
     return texture_result
+
+
+def solve_texture_aware_solution(
+    corrected: np.ndarray,
+    pieces: Sequence[DetectedPiece],
+    target_center: Pt,
+    pixels_per_mm: float,
+    config: Dict,
+    diagnostics: Dict,
+) -> Optional[Dict]:
+    """在扑克牌模式下让纹理评分和 J/Q/K 模板参与候选解排序。"""
+
+    texture_enabled = texture_pipeline_enabled(config)
+    template_enabled = jqk_template_enabled(config)
+    texture = config.get("texture", {})
+    jqk_template = config.get("jqk_template", {})
+    solver = config.get("solver", {})
+    rerank_top_k = max(
+        1,
+        int(texture.get("candidate_top_k", 7)) if texture_enabled else 1,
+        int(jqk_template.get("candidate_top_k", 7)) if template_enabled else 1,
+    )
+    if not texture_enabled and not template_enabled:
+        return None
+
+    short_range = tuple(solver.get("rectangle_short_range_mm", [40.0, 100.0]))
+    long_range = tuple(solver.get("rectangle_long_range_mm", [80.0, 130.0]))
+
+    result = solve_with_texture(
+        [{"pts": piece.points_mm} for piece in pieces],
+        build_texture_pieces(pieces),
+        target_center=target_center,
+        mm_per_px=float(texture.get("mm_per_px_override", pixels_per_mm)),
+        strip_width_mm=float(texture.get("strip_width_mm", 5.0)),
+        lambda_texture=float(texture.get("lambda_texture", 0.5)) if texture_enabled else 0.0,
+        top_k=rerank_top_k,
+        geometry_kwargs={
+            "overlap_tolerance_mm": float(solver.get("overlap_tolerance_mm", 2.5)),
+            "rectangle_area_tolerance": float(
+                solver.get("rectangle_area_tolerance", 0.06)
+            ),
+            "size_range_mm": (
+                (float(short_range[0]), float(short_range[1])),
+                (float(long_range[0]), float(long_range[1])),
+            ),
+            "dimension_tolerance_mm": float(
+                solver.get("dimension_tolerance_mm", 3.0)
+            ),
+            "max_search_nodes": int(solver.get("max_search_nodes", 20_000)),
+            "diagnostics": diagnostics,
+        },
+        gw=float(texture.get("gradient_weight", 0.35)),
+        nw=float(texture.get("ncc_weight", 0.30)),
+        ow=float(texture.get("orb_weight", 0.35)),
+        pw=float(texture.get("pattern_weight", 0.45)),
+        fallback_full_rect_penalty=float(
+            texture.get("fallback_full_rect_penalty", 0.12)
+        ),
+        fallback_sparse_seam_penalty=float(
+            texture.get("fallback_sparse_seam_penalty", 0.08)
+        ),
+        angle_perturb_rad=float(texture.get("candidate_angle_perturb_rad", 0.035)),
+        translate_perturb_mm=float(texture.get("candidate_translate_perturb_mm", 1.2)),
+    )
+    if not isinstance(result, dict) or result.get("error"):
+        return None
+
+    best_solution = result.get("best_solution")
+    best_texture = result.get("texture") if texture_enabled else None
+    if best_solution is None:
+        return None
+
+    template_info = None
+    template_visuals = None
+    template_rerank = rerank_solution_with_jqk_templates(
+        corrected,
+        pieces,
+        pixels_per_mm,
+        config,
+        result,
+        diagnostics,
+    )
+    if template_rerank is not None:
+        reranked_solution, template_info, template_visuals = template_rerank
+        if template_info.get("applied"):
+            best_solution = reranked_solution
+
+    if isinstance(best_texture, dict):
+        best_texture = dict(best_texture)
+        best_texture["candidate_count"] = len(result.get("candidates", []))
+        best_texture["reranked"] = texture_enabled and rerank_top_k > 1
+        best_texture["j_shape"] = float(result.get("j_shape", 0.0))
+        best_texture["j_texture"] = float(result.get("j_texture", 0.0))
+        best_texture["j_total"] = float(result.get("j_total", 0.0))
+    return {
+        "solution": best_solution,
+        "texture": best_texture,
+        "template": template_info,
+        "template_visuals": template_visuals,
+    }
 
 
 def apply_solution_spread(solution: Dict, spread_mm: float) -> Dict:
@@ -891,6 +1774,7 @@ def solution_to_json(
     solution: Optional[Dict],
     status: str,
     message: str,
+    config: Dict,
     diagnostics: Optional[Dict] = None,
 ) -> Dict:
     """将求解结果转换为便于树莓派串口程序读取的 JSON。"""
@@ -899,6 +1783,7 @@ def solution_to_json(
         "status": status,
         "message": message,
         "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+        "piece_mode": get_piece_mode(config),
         "coordinate_system": "透视矫正后的工作区坐标，原点左上，X 向右，Y 向下，单位 mm",
         "piece_count": len(pieces),
         "diagnostics": diagnostics or {},
@@ -914,6 +1799,16 @@ def solution_to_json(
     if solution is None:
         result["solution"] = None
         return result
+
+    def placement_source_orientation(placement: Dict) -> float:
+        if "source_orientation" in placement:
+            return float(placement["source_orientation"])
+        return 0.0
+
+    def placement_target_orientation(placement: Dict) -> float:
+        if "target_orientation" in placement:
+            return float(placement["target_orientation"])
+        return placement_source_orientation(placement) + float(placement.get("angle", 0.0))
 
     result["solution"] = {
         "area_error": solution["area_error"],
@@ -931,8 +1826,8 @@ def solution_to_json(
                 "target_center_mm": [placement["target_center"].x, placement["target_center"].y],
                 "angle_rad": placement["angle"],
                 "angle_deg": math.degrees(placement["angle"]),
-                "pick_wrist_rad": placement["source_orientation"],
-                "place_wrist_rad": placement["target_orientation"],
+                "pick_wrist_rad": placement_source_orientation(placement),
+                "place_wrist_rad": placement_target_orientation(placement),
                 "target_points_mm": [[point.x, point.y] for point in placement["target_pts"]],
             }
             for placement in solution["placements"]
@@ -975,6 +1870,7 @@ def print_result_diagnostics(result: Dict) -> None:
 
     print(f"[{result['timestamp']}] {result['message']}")
     texture = result.get("texture")
+    template = result.get("template")
     if texture:
         print(
             "  纹理评分："
@@ -982,7 +1878,17 @@ def print_result_diagnostics(result: Dict) -> None:
             f"gradient={texture.get('gradient_discontinuity', 0.0):.3f}，"
             f"ncc={texture.get('ncc_similarity', 0.0):.3f}，"
             f"orb={texture.get('orb_consistency', 0.0):.3f}，"
+            f"pattern={texture.get('pattern_consistency', 0.0):.3f}，"
             f"j_total={texture.get('j_total', 0.0):.3f}"
+        )
+    if template:
+        print(
+            "  J/Q/K 模板："
+            f"best={template.get('template_best_name', 'N/A')}，"
+            f"score={template.get('template_best_score', 0.0):.3f}，"
+            f"delta={template.get('template_score_margin', 0.0):.3f}，"
+            f"candidates={template.get('candidate_count', 0)}，"
+            f"fallback={'yes' if template.get('fallback_triggered') else 'no'}"
         )
     if result.get("status") == "ok":
         overlap_adjustment = result.get("overlap_adjustment")
@@ -1038,8 +1944,16 @@ def process_frame(frame: np.ndarray, config: Dict, output_dir: Path) -> Tuple[Di
     pieces, mask, warnings = detect_pieces(corrected, config, pixels_per_mm)
     solution = None
     texture_info = None
+    texture_rerank_info = None
+    template_info = None
+    template_visuals = None
     overlap_adjustment = None
-    diagnostics: Dict = {}
+    diagnostics: Dict = {
+        "template_enabled": jqk_template_enabled(config),
+        "template_best_name": "",
+        "template_best_score": 0.0,
+        "template_candidate_scores": [],
+    }
 
     if not 2 <= len(pieces) <= 4:
         status = "fragment_count_error"
@@ -1051,14 +1965,26 @@ def process_frame(frame: np.ndarray, config: Dict, output_dir: Path) -> Tuple[Di
             "target_center_mm",
             [workspace["width_mm"] * 0.5, workspace["height_mm"] * 0.5],
         )
-        solution = find_rectangle_solution(
-            [{"pts": piece.points_mm} for piece in pieces],
-            target_center=Pt(float(target[0]), float(target[1])),
-            overlap_tolerance_mm=float(
-                config.get("solver", {}).get("overlap_tolerance_mm", 2.5)
-            ),
-            diagnostics=diagnostics,
+        target_center = Pt(float(target[0]), float(target[1]))
+        texture_solved = solve_texture_aware_solution(
+            corrected,
+            pieces, target_center, pixels_per_mm, config, diagnostics
         )
+        if texture_solved is not None:
+            solution = texture_solved.get("solution")
+            texture_info = texture_solved.get("texture")
+            template_info = texture_solved.get("template")
+            template_visuals = texture_solved.get("template_visuals")
+            texture_rerank_info = texture_info
+        else:
+            solution = find_rectangle_solution(
+                [{"pts": piece.points_mm} for piece in pieces],
+                target_center=target_center,
+                overlap_tolerance_mm=float(
+                    config.get("solver", {}).get("overlap_tolerance_mm", 2.5)
+                ),
+                diagnostics=diagnostics,
+            )
         if solution is None:
             status = "no_solution"
             message = f"检测到碎片，但矩形求解失败：{diagnose_solver_failure(diagnostics)}"
@@ -1073,6 +1999,10 @@ def process_frame(frame: np.ndarray, config: Dict, output_dir: Path) -> Tuple[Di
                 config,
             )
             texture_info = score_solution_texture(solution, pieces, pixels_per_mm, config)
+            if texture_info is not None and texture_rerank_info is not None:
+                texture_info["candidate_count"] = texture_rerank_info.get("candidate_count", 0)
+                texture_info["reranked"] = True
+                texture_info["rerank_pre_j_total"] = texture_rerank_info.get("j_total", 0.0)
             status = "ok"
             rectangle = solution["rectangle"]
             short_side, long_side = sorted((rectangle["width"], rectangle["height"]))
@@ -1082,6 +2012,17 @@ def process_frame(frame: np.ndarray, config: Dict, output_dir: Path) -> Tuple[Di
             )
             if texture_info is not None:
                 message += f"，纹理分 {texture_info['texture_score']:.3f}"
+                if texture_info.get("reranked"):
+                    message += f"，纹理重排 {texture_info.get('candidate_count', 0)} 候选"
+            if template_info is not None:
+                message += f"，模板分 {template_info.get('template_best_score', 0.0):.3f}"
+                if template_info.get("applied"):
+                    message += (
+                        f"（{template_info.get('template_best_name', '')}，"
+                        f"候选 {template_info.get('candidate_count', 0)}）"
+                    )
+                elif template_info.get("fallback_triggered"):
+                    message += "（模板置信度不足，已回退）"
             spread_mm = float(config.get("solver", {}).get("placement_spread_mm", 0.0))
             if spread_mm > 0.0:
                 message += f"，外扩 {spread_mm:.1f} mm"
@@ -1093,21 +2034,40 @@ def process_frame(frame: np.ndarray, config: Dict, output_dir: Path) -> Tuple[Di
 
     if warnings:
         message += f"；另有 {len(warnings)} 个轮廓被忽略"
-    result = solution_to_json(pieces, solution, status, message, diagnostics)
+    result = solution_to_json(pieces, solution, status, message, config, diagnostics)
     result["camera_resolution"] = [int(frame.shape[1]), int(frame.shape[0])]
     result["workspace_mm"] = [
         float(config["workspace"]["width_mm"]),
         float(config["workspace"]["height_mm"]),
     ]
     result["texture"] = texture_info
+    result["template"] = template_info
     result["overlap_adjustment"] = overlap_adjustment
     result["warnings"] = warnings
-    result_image = create_result_image(corrected, pieces, solution, pixels_per_mm, message, config)
+    result_image = create_result_image(
+        corrected,
+        pieces,
+        solution,
+        pixels_per_mm,
+        message,
+        config,
+        template_visuals=template_visuals,
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output_dir / "latest_corrected.jpg"), corrected)
     cv2.imwrite(str(output_dir / "latest_mask.png"), mask)
     cv2.imwrite(str(output_dir / "latest_result.jpg"), result_image)
+    if template_visuals:
+        card_preview = template_visuals.get("card_preview")
+        template_preview = template_visuals.get("template_preview")
+        mask_comparison = template_visuals.get("mask_comparison")
+        if isinstance(card_preview, np.ndarray):
+            cv2.imwrite(str(output_dir / "latest_jqk_card_preview.png"), card_preview)
+        if isinstance(template_preview, np.ndarray):
+            cv2.imwrite(str(output_dir / "latest_jqk_best_template.png"), template_preview)
+        if isinstance(mask_comparison, np.ndarray):
+            cv2.imwrite(str(output_dir / "latest_jqk_mask_compare.png"), mask_comparison)
     for piece_index, piece in enumerate(pieces):
         if piece.piece_image is not None:
             cv2.imwrite(str(output_dir / f"latest_piece_{piece_index}.png"), piece.piece_image)
@@ -1117,28 +2077,61 @@ def process_frame(frame: np.ndarray, config: Dict, output_dir: Path) -> Tuple[Di
 
 
 def create_debug_view(
-    frame: np.ndarray, config: Dict, threshold: int, morphology_mm: float
+    frame: np.ndarray,
+    config: Dict,
+    threshold: int,
+    morphology_mm: float,
+    background_distance: Optional[float] = None,
+    blue_hue_tolerance: Optional[float] = None,
+    blue_saturation_min: Optional[float] = None,
+    card_noise_open_mm: Optional[float] = None,
+    card_hole_close_mm: Optional[float] = None,
 ) -> np.ndarray:
-    """生成四宫格分割调试图，不执行矩形求解。"""
+    """生成调试图，不执行矩形求解。"""
 
-    corrected, pixels_per_mm = perspective_transform(frame, config)
+    view_config = copy.deepcopy(config)
+    if get_piece_mode(view_config) == "playing_cards":
+        segmentation = view_config["segmentation"]
+        if background_distance is not None:
+            segmentation["background_distance_threshold"] = float(background_distance)
+        if blue_hue_tolerance is not None:
+            segmentation["blue_hue_tolerance_deg"] = float(blue_hue_tolerance)
+        if blue_saturation_min is not None:
+            segmentation["blue_background_min_saturation"] = float(blue_saturation_min)
+        if card_noise_open_mm is not None:
+            segmentation["playing_card_noise_open_mm"] = float(card_noise_open_mm)
+        if card_hole_close_mm is not None:
+            segmentation["playing_card_hole_close_mm"] = float(card_hole_close_mm)
+
+    corrected, pixels_per_mm = perspective_transform(frame, view_config)
     gray, mask = segment_image(
         corrected,
-        config,
+        view_config,
         pixels_per_mm,
         threshold_override=threshold,
         morphology_override=morphology_mm,
+        card_open_override=card_noise_open_mm,
+        card_close_override=card_hole_close_mm,
     )
-    mask = restrict_mask_to_piece_search_area(mask, config, pixels_per_mm)
+    mask = restrict_mask_to_piece_search_area(mask, view_config, pixels_per_mm)
     contour_view = corrected.copy()
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if get_piece_mode(view_config) == "playing_cards":
+        contours = split_touching_card_contours(
+            mask,
+            pixels_per_mm,
+            float(view_config["segmentation"].get("polygon_epsilon_mm", 1.2)),
+        )
+    else:
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(contour_view, contours, -1, (0, 220, 0), 3)
-    margin_px = get_rectify_margin_px(config, pixels_per_mm)
-    workspace_height_px = round(float(config["workspace"]["height_mm"]) * pixels_per_mm)
+    margin_px = get_rectify_margin_px(view_config, pixels_per_mm)
+    workspace_height_px = round(float(view_config["workspace"]["height_mm"]) * pixels_per_mm)
     split_y = margin_px + workspace_height_px // 2
     cv2.line(contour_view, (0, split_y), (corrected.shape[1] - 1, split_y), (0, 0, 255), 2, cv2.LINE_AA)
 
-    panel_width = corrected.shape[1] // 2
+    playing_cards = get_piece_mode(view_config) == "playing_cards"
+    panel_columns = 3 if playing_cards else 2
+    panel_width = corrected.shape[1] // panel_columns
     panel_height = corrected.shape[0] // 2
 
     def panel(image: np.ndarray, title: str) -> np.ndarray:
@@ -1158,8 +2151,33 @@ def create_debug_view(
         )
         return np.vstack((title_bar, resized))
 
-    top = np.hstack((panel(corrected, "CORRECTED"), panel(gray, "GRAY")))
-    bottom = np.hstack((panel(mask, "BINARY MASK"), panel(contour_view, "CONTOURS")))
+    if playing_cards:
+        _, blue_background = classify_playing_card_colors(
+            corrected, view_config["segmentation"]
+        )
+        blue_background = restrict_mask_to_piece_search_area(
+            blue_background, view_config, pixels_per_mm
+        )
+        red_pattern_mask, black_pattern_mask = extract_playing_card_pattern_masks(
+            corrected, mask
+        )
+        top = np.hstack(
+            (
+                panel(corrected, "CORRECTED"),
+                panel(blue_background, "BLUE BACKGROUND MODEL"),
+                panel(mask, "CARD FOREGROUND MASK"),
+            )
+        )
+        bottom = np.hstack(
+            (
+                panel(red_pattern_mask, "RED PATTERN MASK"),
+                panel(black_pattern_mask, "BLACK PATTERN MASK"),
+                panel(contour_view, "CONTOURS"),
+            )
+        )
+    else:
+        top = np.hstack((panel(corrected, "CORRECTED"), panel(gray, "GRAY")))
+        bottom = np.hstack((panel(mask, "BINARY MASK"), panel(contour_view, "CONTOURS")))
     return np.vstack((top, bottom))
 
 
@@ -1182,8 +2200,46 @@ def run_debug_triggered_mode(
         max(0, round(float(config["segmentation"].get("morphology_mm", 0.8)) * 10.0)),
     )
     cv2.createTrackbar("Morphology x0.1mm", window_name, morphology_initial, 50, lambda _: None)
-    print("调试窗口已启动：空格=按当前参数检测，S=保存参数，Q/Esc=退出。")
-    print("请观察 BINARY MASK：碎片应为白色，深蓝背景应为黑色。")
+    playing_cards = get_piece_mode(config) == "playing_cards"
+    if playing_cards:
+        segmentation = config["segmentation"]
+        distance_initial = min(
+            100,
+            max(1, round(float(segmentation.get("background_distance_threshold", 28.0)))),
+        )
+        hue_initial = min(
+            60,
+            max(1, round(float(segmentation.get("blue_hue_tolerance_deg", 28.0)))),
+        )
+        saturation_initial = min(
+            255,
+            max(0, round(float(segmentation.get("blue_background_min_saturation", 70.0)))),
+        )
+        card_open_initial = min(
+            50,
+            max(
+                0,
+                round(float(segmentation.get("playing_card_noise_open_mm", 0.5)) * 10.0),
+            ),
+        )
+        card_close_initial = min(
+            50,
+            max(
+                0,
+                round(float(segmentation.get("playing_card_hole_close_mm", 1.0)) * 10.0),
+            ),
+        )
+        cv2.createTrackbar("Color distance", window_name, distance_initial, 100, lambda _: None)
+        cv2.createTrackbar("Blue hue tolerance", window_name, hue_initial, 60, lambda _: None)
+        cv2.createTrackbar("Blue saturation min", window_name, saturation_initial, 255, lambda _: None)
+        cv2.createTrackbar("Card open x0.1mm", window_name, card_open_initial, 50, lambda _: None)
+        cv2.createTrackbar("Card close x0.1mm", window_name, card_close_initial, 50, lambda _: None)
+    print("调试窗口已启动：空格=按当前参数检测，D=保存当前分离图，S=保存参数，Q/Esc=退出。")
+    if get_piece_mode(config) == "playing_cards":
+        print("请观察 BLUE BACKGROUND MODEL：深蓝背景应为白色，扑克牌应为黑色。")
+        print("请观察 CARD FOREGROUND MASK：整块扑克牌应为白色，背景应为黑色。")
+    else:
+        print("请观察 BINARY MASK：碎片应为白色，深蓝背景应为黑色。")
 
     frame = initial_frame
     while True:
@@ -1194,14 +2250,57 @@ def run_debug_triggered_mode(
             0.1,
             cv2.getTrackbarPos("Morphology x0.1mm", window_name) / 10.0,
         )
-        debug_view = create_debug_view(frame, config, threshold, morphology_mm)
+        if playing_cards:
+            background_distance = max(
+                1, cv2.getTrackbarPos("Color distance", window_name)
+            )
+            blue_hue_tolerance = max(
+                1, cv2.getTrackbarPos("Blue hue tolerance", window_name)
+            )
+            blue_saturation_min = cv2.getTrackbarPos(
+                "Blue saturation min", window_name
+            )
+            card_noise_open_mm = (
+                cv2.getTrackbarPos("Card open x0.1mm", window_name) / 10.0
+            )
+            card_hole_close_mm = (
+                cv2.getTrackbarPos("Card close x0.1mm", window_name) / 10.0
+            )
+        else:
+            background_distance = None
+            blue_hue_tolerance = None
+            blue_saturation_min = None
+            card_noise_open_mm = None
+            card_hole_close_mm = None
+        debug_view = create_debug_view(
+            frame,
+            config,
+            threshold,
+            morphology_mm,
+            background_distance,
+            blue_hue_tolerance,
+            blue_saturation_min,
+            card_noise_open_mm,
+            card_hole_close_mm,
+        )
         cv2.imshow(window_name, debug_view)
         key = cv2.waitKey(20) & 0xFF
         if key in (ord("q"), ord("Q"), 27):
             return 0
+        if key in (ord("d"), ord("D")):
+            output_dir.mkdir(parents=True, exist_ok=True)
+            debug_path = output_dir / "latest_color_model_debug.png"
+            cv2.imwrite(str(debug_path), debug_view)
+            print(f"已保存颜色模型调试图：{debug_path}")
         if key in (ord("s"), ord("S")):
             config["segmentation"]["threshold"] = threshold
             config["segmentation"]["morphology_mm"] = morphology_mm
+            if playing_cards:
+                config["segmentation"]["background_distance_threshold"] = background_distance
+                config["segmentation"]["blue_hue_tolerance_deg"] = blue_hue_tolerance
+                config["segmentation"]["blue_background_min_saturation"] = blue_saturation_min
+                config["segmentation"]["playing_card_noise_open_mm"] = card_noise_open_mm
+                config["segmentation"]["playing_card_hole_close_mm"] = card_hole_close_mm
             save_config(config_path, config)
             print(
                 f"分割参数已保存：threshold={threshold}, "
@@ -1211,6 +2310,12 @@ def run_debug_triggered_mode(
             debug_config = copy.deepcopy(config)
             debug_config["segmentation"]["threshold"] = threshold
             debug_config["segmentation"]["morphology_mm"] = morphology_mm
+            if playing_cards:
+                debug_config["segmentation"]["background_distance_threshold"] = background_distance
+                debug_config["segmentation"]["blue_hue_tolerance_deg"] = blue_hue_tolerance
+                debug_config["segmentation"]["blue_background_min_saturation"] = blue_saturation_min
+                debug_config["segmentation"]["playing_card_noise_open_mm"] = card_noise_open_mm
+                debug_config["segmentation"]["playing_card_hole_close_mm"] = card_hole_close_mm
             result, result_image = process_frame(frame.copy(), debug_config, output_dir)
             print_result_diagnostics(result)
             cv2.namedWindow(result_window, cv2.WINDOW_NORMAL)

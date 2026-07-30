@@ -333,6 +333,61 @@ def _angle_wrap(angle: float) -> float:
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
+def polygon_orientation(points: Sequence[Pt]) -> float:
+    """用最小面积外接矩形的主边估计碎片方向，结果单位为弧度。"""
+
+    rectangle = minimum_area_rectangle(points)
+    return 0.0 if rectangle is None else _angle_wrap(rectangle["angle"])
+
+
+def _rotate_about(point: Pt, center: Pt, angle: float) -> Pt:
+    return point.sub(center).rotate(angle).add(center)
+
+
+def _normalize_rectangle_pose(
+    rectangle: Dict,
+    poses: Dict[int, Tuple[float, Pt]],
+    world_polygons: Dict[int, List[Pt]],
+) -> Tuple[Dict, Dict[int, Tuple[float, Pt]], Dict[int, List[Pt]]]:
+    """把最终矩形摆正到：长边平行 X，短边平行 Y。"""
+
+    width = float(rectangle["width"])
+    height = float(rectangle["height"])
+    center = rectangle["center"]
+
+    long_side_angle = rectangle["angle"] if width >= height else rectangle["angle"] + math.pi * 0.5
+    normalize_angle = -_angle_wrap(long_side_angle)
+
+    normalized_rectangle = dict(rectangle)
+    long_side = max(width, height)
+    short_side = min(width, height)
+    normalized_rectangle["width"] = long_side
+    normalized_rectangle["height"] = short_side
+    normalized_rectangle["angle"] = 0.0
+    half_long = long_side * 0.5
+    half_short = short_side * 0.5
+    normalized_rectangle["corners"] = [
+        center.add(Pt(-half_long, -half_short)),
+        center.add(Pt(half_long, -half_short)),
+        center.add(Pt(half_long, half_short)),
+        center.add(Pt(-half_long, half_short)),
+    ]
+
+    normalized_poses: Dict[int, Tuple[float, Pt]] = {}
+    normalized_polygons: Dict[int, List[Pt]] = {}
+    for piece_index, (angle, piece_center) in poses.items():
+        normalized_poses[piece_index] = (
+            _angle_wrap(angle + normalize_angle),
+            _rotate_about(piece_center, center, normalize_angle),
+        )
+        normalized_polygons[piece_index] = [
+            _rotate_about(point, center, normalize_angle)
+            for point in world_polygons[piece_index]
+        ]
+
+    return normalized_rectangle, normalized_poses, normalized_polygons
+
+
 def _align_opposite_edges(
     fixed_start: Pt,
     fixed_end: Pt,
@@ -436,6 +491,7 @@ def _prepare_pieces(pieces: Sequence[Dict]) -> List[Dict]:
             {
                 "index": index,
                 "source_center": source_center,
+                "source_orientation": polygon_orientation(observed),
                 "local_points": local_points,
                 "area": polygon_area(local_points),
             }
@@ -786,12 +842,17 @@ def find_rectangle_solution(
         return None
 
     rectangle = best_solution["rectangle"]
+    rectangle, normalized_poses, normalized_world_polygons = _normalize_rectangle_pose(
+        rectangle,
+        best_solution["poses"],
+        best_solution["world_polygons"],
+    )
     desired_center = target_center if target_center is not None else rectangle["center"]
     shift = desired_center.sub(rectangle["center"])
 
     placements = []
     for piece in prepared:
-        angle, center = best_solution["poses"][piece["index"]]
+        angle, center = normalized_poses[piece["index"]]
         shifted_center = center.add(shift)
         placements.append(
             {
@@ -800,9 +861,11 @@ def find_rectangle_solution(
                 "target_center": shifted_center,
                 "offset": shifted_center.sub(piece["source_center"]),
                 "angle": _angle_wrap(angle),
+                "source_orientation": piece["source_orientation"],
+                "target_orientation": _angle_wrap(piece["source_orientation"] + angle),
                 "target_pts": [
                     point.add(shift)
-                    for point in best_solution["world_polygons"][piece["index"]]
+                    for point in normalized_world_polygons[piece["index"]]
                 ],
             }
         )
@@ -811,8 +874,8 @@ def find_rectangle_solution(
     rectangle["center"] = desired_center
     rectangle["corners"] = [corner.add(shift) for corner in rectangle["corners"]]
     # Refine solution: slightly optimize piece positions
-    refined_poses = dict(best_solution["poses"])
-    refined_world = dict(best_solution["world_polygons"])
+    refined_poses = dict(normalized_poses)
+    refined_world = dict(normalized_world_polygons)
     
     for iteration in range(5):
         placed_indices = list(refined_poses.keys())
@@ -864,6 +927,8 @@ def find_rectangle_solution(
             "target_center": shifted_center,
             "offset": shifted_center.sub(piece["source_center"]),
             "angle": _angle_wrap(angle),
+            "source_orientation": piece["source_orientation"],
+            "target_orientation": _angle_wrap(piece["source_orientation"] + angle),
             "target_pts": [pt.add(shift) for pt in refined_world[piece["index"]]],
         })
     
@@ -1061,30 +1126,42 @@ class TextureScorer:
     """çº¹ç†è¿žç»­æ€§è¯„åˆ†å™¨ (v3)."""
 
     def __init__(self, mm_per_px=10.0, strip_width_mm=5.0,
-                 lambda_texture=0.5, gw=0.35, nw=0.30, ow=0.35):
+                 lambda_texture=0.5, gw=0.35, nw=0.30, ow=0.35, pw=0.45,
+                 fallback_full_rect_penalty=0.12,
+                 fallback_sparse_seam_penalty=0.08):
         self.mm_per_px = mm_per_px
         self.strip_r = max(2, int(strip_width_mm * mm_per_px * 0.5))
         self.lambda_t = lambda_texture
-        self.w_g = max(0.01,gw); self.w_n = max(0.01,nw); self.w_o = max(0.01,ow)
-        s = self.w_g + self.w_n + self.w_o
-        self.w_g /= s; self.w_n /= s; self.w_o /= s
+        self.w_g = max(0.01,gw); self.w_n = max(0.01,nw); self.w_o = max(0.01,ow); self.w_p = max(0.01,pw)
+        s = self.w_g + self.w_n + self.w_o + self.w_p
+        self.w_g /= s; self.w_n /= s; self.w_o /= s; self.w_p /= s
+        self.full_rect_penalty = max(0.0, float(fallback_full_rect_penalty))
+        self.sparse_seam_penalty = max(0.0, float(fallback_sparse_seam_penalty))
 
     def score_solution(self, solution: Dict, pieces: Sequence[Dict]) -> Dict:
         r = self._render(solution, pieces)
         if r is None: return self._def("no images")
-        canvas, masks = r
+        canvas, masks, pattern_layers = r
         seams = self._find_seams(masks)
         if not seams:
-            fb = self._full_rect(canvas, masks)
+            fb = self._full_rect(canvas, masks, pattern_layers)
             return self._asm(fb, [], True, False)
-        ss = []; gs = ns = os_ = 0.0; fb_flag = False
+        ss = []; gs = ns = os_ = ps = 0.0; fb_flag = False; total_weight = 0.0
         for s in seams:
-            sc = self._score_seam(canvas, s)
+            sc = self._score_seam(canvas, pattern_layers, s)
             ss.append(sc)
             if sc.get("fb"): fb_flag = True
-            gs += sc["g"]; ns += sc["n"]; os_ += sc["o"]
-        n = len(ss)
-        return self._asm({"g": gs/n, "n": ns/n, "o": os_/n}, ss, False, fb_flag)
+            weight = max(1.0, float(sc.get("weight", 1.0)))
+            total_weight += weight
+            gs += sc["g"] * weight
+            ns += sc["n"] * weight
+            os_ += sc["o"] * weight
+            ps += sc["p"] * weight
+        if total_weight <= 1e-6:
+            total_weight = float(max(1, len(ss)))
+        return self._asm(
+            {"g": gs/total_weight, "n": ns/total_weight, "o": os_/total_weight, "p": ps/total_weight},
+            ss, False, fb_flag)
 
     def total_score(self, shape_score: float, tex: Dict) -> float:
         jt = 1.0 - tex.get("texture_score", 0.5)
@@ -1124,6 +1201,8 @@ class TextureScorer:
 
         canvas_acc = np.zeros((ch,cw,3), dtype=np.float64)
         weight_acc = np.zeros((ch,cw), dtype=np.float64)
+        red_pattern_acc = np.zeros((ch,cw), dtype=np.uint8)
+        black_pattern_acc = np.zeros((ch,cw), dtype=np.uint8)
         masks = {}
 
         for pi, p in enumerate(pieces):
@@ -1141,6 +1220,7 @@ class TextureScorer:
                               [sa,  ca, ty-(sa*sc.x+ca*sc.y)]], dtype=np.float64)
                 mask_src = np.zeros((h2,w2), dtype=np.uint8)
                 cv2.fillPoly(mask_src, [np.array([(pt.x,pt.y) for pt in sp], dtype=np.int32)], 255)
+                red_src, black_src = self._extract_card_pattern_masks(img, mask_src)
                 md = np.zeros((ch,cw), dtype=np.uint8)
                 cv2.warpAffine(mask_src, M, (cw,ch), dst=md,
                                borderMode=cv2.BORDER_CONSTANT, borderValue=0, flags=cv2.INTER_NEAREST)
@@ -1149,6 +1229,14 @@ class TextureScorer:
                 iw = np.zeros((ch,cw,3), dtype=np.float64)
                 cv2.warpAffine(img_f, M, (cw,ch), dst=iw,
                                borderMode=cv2.BORDER_CONSTANT, borderValue=0, flags=cv2.INTER_LINEAR)
+                red_dst = np.zeros((ch,cw), dtype=np.uint8)
+                black_dst = np.zeros((ch,cw), dtype=np.uint8)
+                cv2.warpAffine(red_src, M, (cw,ch), dst=red_dst,
+                               borderMode=cv2.BORDER_CONSTANT, borderValue=0, flags=cv2.INTER_NEAREST)
+                cv2.warpAffine(black_src, M, (cw,ch), dst=black_dst,
+                               borderMode=cv2.BORDER_CONSTANT, borderValue=0, flags=cv2.INTER_NEAREST)
+                red_pattern_acc = cv2.bitwise_or(red_pattern_acc, red_dst)
+                black_pattern_acc = cv2.bitwise_or(black_pattern_acc, black_dst)
                 mf = md.astype(np.float64)/255.0
                 for cc in range(3): canvas_acc[:,:,cc] += iw[:,:,cc]*mf
                 weight_acc += mf
@@ -1160,7 +1248,27 @@ class TextureScorer:
         for cc in range(3):
             canvas[:,:,cc] = np.where(valid,
                 np.clip(canvas_acc[:,:,cc]/np.maximum(weight_acc, 1e-10), 0, 255), 0).astype(np.uint8)
-        return canvas, masks
+        return canvas, masks, {"red": red_pattern_acc, "black": black_pattern_acc}
+
+    def _extract_card_pattern_masks(self, img, polygon_mask):
+        if img.ndim == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        valid = polygon_mask > 0
+        h = hsv[:, :, 0].astype(np.int16)
+        s = hsv[:, :, 1].astype(np.uint8)
+        v = hsv[:, :, 2].astype(np.uint8)
+
+        red = (((h <= 14) | (h >= 166)) & (s >= 55) & (v >= 35) & valid)
+        black = ((gray <= 118) & (v <= 150) & (~red) & valid)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        red_u8 = (red.astype(np.uint8) * 255)
+        black_u8 = (black.astype(np.uint8) * 255)
+        red_u8 = cv2.morphologyEx(red_u8, cv2.MORPH_OPEN, kernel)
+        black_u8 = cv2.morphologyEx(black_u8, cv2.MORPH_OPEN, kernel)
+        return red_u8, black_u8
 
     def _shape_mask(self, poly, cw, ch, ox, oy):
         mask = np.zeros((ch,cw), dtype=np.uint8)
@@ -1196,16 +1304,15 @@ class TextureScorer:
             gy[:,:,c]=cv2.Sobel(canvas[:,:,c],cv2.CV_32F,0,1,ksize=3)
         return np.max(np.sqrt(gx**2+gy**2), axis=2)
 
-    def _score_seam(self, canvas, s):
+    def _score_seam(self, canvas, pattern_layers, s):
         r = self.strip_r; mi,mj = s["mi"],s["mj"]; reg,edg = s["r"],s["e"]
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3))
-        gray = cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY) if canvas.ndim==3 else canvas
         di = cv2.dilate(mi,k,iterations=r); dj = cv2.dilate(mj,k,iterations=r)
         si = cv2.bitwise_and(cv2.bitwise_and(di,cv2.bitwise_not(mj)), reg)
         sj = cv2.bitwise_and(cv2.bitwise_and(dj,cv2.bitwise_not(mi)), reg)
         if np.sum(si>0)<10 or np.sum(sj>0)<10:
-            fb = self._full_rect(canvas, {0: cv2.bitwise_or(mi,mj)})
-            return {"g":fb["g"],"n":fb["n"],"o":fb["o"],"fb":True}
+            fb = self._full_rect(canvas, {0: cv2.bitwise_or(mi,mj)}, pattern_layers)
+            return {"g":fb["g"],"n":fb["n"],"o":fb["o"],"p":fb["p"],"fb":True,"weight":1.0}
         # Gradient
         gm = self._color_gradient_mag(canvas)
         sg = np.median(gm[reg>0]) if np.sum(reg>0)>0 else 0.0
@@ -1213,10 +1320,70 @@ class TextureScorer:
         inner = cv2.bitwise_and(mi,cv2.bitwise_not(er))
         ig_ = np.median(gm[inner>0]) if np.sum(inner>0)>0 else 1.0
         grad_s = min(sg/max(ig_,1.0),2.0)/2.0
-        # NCC (per-point along edge, vectorized)
         ncc_s = self._ncc_along_edge(canvas, si, sj, edg, r)
         orb_s = self._orb(canvas, si, sj)
-        return {"g":float(grad_s),"n":float(ncc_s),"o":float(orb_s),"fb":False}
+        pattern_s, pattern_strength = self._pattern_consistency(pattern_layers, si, sj, edg, r)
+        seam_pixels = float(max(cv2.countNonZero(edg), cv2.countNonZero(reg)))
+        texture_energy = float(np.median(gm[cv2.bitwise_or(si, sj) > 0])) if np.any(cv2.bitwise_or(si, sj) > 0) else 0.0
+        weight = max(1.0, seam_pixels) * (0.25 + min(texture_energy / 24.0, 1.0) + 0.8 * pattern_strength)
+        return {
+            "g":float(grad_s),"n":float(ncc_s),"o":float(orb_s),"p":float(pattern_s),
+            "fb":False,"weight":float(weight),
+            "pattern_strength":float(pattern_strength),
+        }
+
+    def _pattern_consistency(self, pattern_layers, si, sj, edge, r):
+        if not pattern_layers:
+            return 0.5, 0.0
+        red = pattern_layers.get("red")
+        black = pattern_layers.get("black")
+        if red is None or black is None:
+            return 0.5, 0.0
+
+        ys, xs = np.where(edge > 0)
+        if len(xs) < 5:
+            return 0.5, 0.0
+
+        count = min(20, len(xs))
+        idx = np.linspace(0, len(xs) - 1, count, dtype=int)
+        radius = min(r, 5)
+        scores = []
+        weights = []
+        for sample_index in idx:
+            cx, cy = int(xs[sample_index]), int(ys[sample_index])
+            y0 = max(0, cy - radius); y1 = cy + radius + 1
+            x0 = max(0, cx - radius); x1 = cx + radius + 1
+            local_i = si[y0:y1, x0:x1] > 0
+            local_j = sj[y0:y1, x0:x1] > 0
+            if local_i.sum() < 3 or local_j.sum() < 3:
+                continue
+
+            red_i = float(np.mean(red[y0:y1, x0:x1][local_i] > 0))
+            red_j = float(np.mean(red[y0:y1, x0:x1][local_j] > 0))
+            black_i = float(np.mean(black[y0:y1, x0:x1][local_i] > 0))
+            black_j = float(np.mean(black[y0:y1, x0:x1][local_j] > 0))
+
+            red_info = max(red_i, red_j)
+            black_info = max(black_i, black_j)
+            local_weight = red_info + black_info
+            if local_weight < 0.03:
+                scores.append(0.5)
+                weights.append(0.1)
+                continue
+
+            red_similarity = 1.0 - abs(red_i - red_j)
+            black_similarity = 1.0 - abs(black_i - black_j)
+            local_score = (
+                red_similarity * red_info + black_similarity * black_info
+            ) / max(local_weight, 1e-6)
+            scores.append(float(local_score))
+            weights.append(float(local_weight))
+
+        if not scores:
+            return 0.5, 0.0
+        weights_np = np.asarray(weights, dtype=np.float32)
+        scores_np = np.asarray(scores, dtype=np.float32)
+        return float(np.average(scores_np, weights=weights_np)), float(np.mean(weights_np))
 
     def _ncc_along_edge(self, canvas, si, sj, edge, r):
         """æ²¿æŽ¥ç¼çº¿é€ç‚¹ NCCï¼ˆå‘é‡åŒ–ï¼Œæ—  Python å¾ªçŽ¯ï¼‰ã€‚"""
@@ -1249,11 +1416,11 @@ class TextureScorer:
         if len(mm)<2: return 0.5
         return float(max(0.0, 1.0-np.mean([m.distance for m in mm])/100.0))
 
-    def _full_rect(self, canvas, masks):
+    def _full_rect(self, canvas, masks, pattern_layers=None):
         gray = cv2.cvtColor(canvas,cv2.COLOR_BGR2GRAY) if canvas.ndim==3 else canvas
         c = np.zeros_like(gray, dtype=np.uint8)
         for m in masks.values(): c = cv2.bitwise_or(c,m)
-        if np.sum(c>0) < 50: return {"g":0.5,"n":0.5,"o":0.5}
+        if np.sum(c>0) < 50: return {"g":0.5,"n":0.5,"o":0.5,"p":0.5}
         gm = self._color_gradient_mag(canvas)
         rg = gm[c>0]
         if len(rg)>0:
@@ -1264,19 +1431,31 @@ class TextureScorer:
         orb = cv2.ORB_create(nfeatures=150)
         kp,de = orb.detectAndCompute(roi,None)
         orb_s = min(len(kp)/50.0,1.0) if (de is not None and len(kp)>=4) else 0.3
-        return {"g":float(grad),"n":0.5,"o":float(orb_s)}
+        pattern_score = 0.5
+        if pattern_layers:
+            red = pattern_layers.get("red")
+            black = pattern_layers.get("black")
+            if red is not None and black is not None and np.sum(c > 0) > 0:
+                red_density = float(np.mean(red[c > 0] > 0))
+                black_density = float(np.mean(black[c > 0] > 0))
+                pattern_score = 0.5 + min(0.25, 0.8 * max(red_density, black_density))
+        return {"g":float(grad),"n":0.5,"o":float(orb_s),"p":float(pattern_score)}
 
     def _asm(self, sc, ss, ff, fs):
-        g,n,o = sc["g"],sc["n"],sc["o"]
-        tex = self.w_g*(1.0-g) + self.w_n*n + self.w_o*o
+        g,n,o,p = sc["g"],sc["n"],sc["o"],sc.get("p", 0.5)
+        tex = self.w_g*(1.0-g) + self.w_n*n + self.w_o*o + self.w_p*p
+        if ff:
+            tex -= self.full_rect_penalty
+        if fs:
+            tex -= self.sparse_seam_penalty
         return {"texture_score":float(max(0.0,min(1.0,tex))),
                 "gradient_discontinuity":float(g),"ncc_similarity":float(n),
-                "orb_consistency":float(o),"seam_scores":ss,
+                "orb_consistency":float(o),"pattern_consistency":float(p),"seam_scores":ss,
                 "fallback_full_rect":ff,"fallback_sparse_seam":fs}
 
     def _def(self, reason):
         return {"texture_score":0.5,"gradient_discontinuity":0.0,
-                "ncc_similarity":0.0,"orb_consistency":0.0,
+                "ncc_similarity":0.0,"orb_consistency":0.0,"pattern_consistency":0.0,
                 "seam_scores":[],"fallback_full_rect":False,
                 "fallback_sparse_seam":False,"error":reason}
 
@@ -1289,7 +1468,12 @@ if __name__ == "__main__":
 
 def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
                        *, mm_per_px=10.0, strip_width_mm=5.0,
-                       lambda_texture=0.5, top_k=1, geometry_kwargs=None):
+                       lambda_texture=0.5, top_k=1, geometry_kwargs=None,
+                       gw=0.35, nw=0.30, ow=0.35, pw=0.45,
+                       fallback_full_rect_penalty=0.12,
+                       fallback_sparse_seam_penalty=0.08,
+                       angle_perturb_rad=0.035,
+                       translate_perturb_mm=1.2):
     """Geometry + texture joint solver with top-K re-ranking.
 
     1. Run geometric solver to find candidate pose(s)
@@ -1317,29 +1501,38 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
     # Step 2: Generate perturbed alternatives for top-K
     if top_k > 1 and 'poses' in sol and 'world_polygons' in sol:
         base_poses = sol['poses']
-        base_world = sol['world_polygons']
         # Build local_points for each piece
         local_pts = {}
         for pi, p in enumerate(pieces_geometry):
             ct = polygon_centroid(p['pts'])
             local_pts[pi] = [pt.sub(ct) for pt in p['pts']]
-        for attempt in range(top_k - 1):
+        perturb_patterns = [
+            (0.0, 0.0, 0.0),
+            (+angle_perturb_rad, 0.0, 0.0),
+            (-angle_perturb_rad, 0.0, 0.0),
+            (0.0, +translate_perturb_mm, 0.0),
+            (0.0, -translate_perturb_mm, 0.0),
+            (0.0, 0.0, +translate_perturb_mm),
+            (0.0, 0.0, -translate_perturb_mm),
+            (+angle_perturb_rad * 0.6, +translate_perturb_mm * 0.6, -translate_perturb_mm * 0.6),
+            (-angle_perturb_rad * 0.6, -translate_perturb_mm * 0.6, +translate_perturb_mm * 0.6),
+        ]
+        for attempt in range(max(0, top_k - 1)):
+            da, dx, dy = perturb_patterns[attempt % len(perturb_patterns)]
             perturbed_poses = {}
             perturbed_world = {}
-            valid = True
             for pi, (angle, center) in base_poses.items():
-                ep_a = (np.random.random() - 0.5) * 0.06
-                ep_x = (np.random.random() - 0.5) * 2.0
-                ep_y = (np.random.random() - 0.5) * 2.0
-                new_center = _ensure_Pt(center).add(Pt(ep_x, ep_y))
-                perturbed_poses[pi] = (angle + ep_a, new_center)
+                # 用确定性的小扰动生成多个邻域候选，避免随机性导致评分忽高忽低。
+                scale = 1.0 + 0.12 * (pi % 3)
+                new_center = _ensure_Pt(center).add(Pt(dx * scale, dy * scale))
+                perturbed_poses[pi] = (angle + da * scale, new_center)
                 # Rebuild world_polygon for this piece
                 lp = local_pts.get(pi)
                 if lp is None:
                     ct = polygon_centroid(pieces_geometry[pi]['pts'])
                     lp = [pt.sub(ct) for pt in pieces_geometry[pi]['pts']]
                     local_pts[pi] = lp
-                perturbed_world[pi] = [pt.rotate(angle + ep_a).add(new_center) for pt in lp]
+                perturbed_world[pi] = [pt.rotate(angle + da * scale).add(new_center) for pt in lp]
             alt = dict(sol)
             alt['poses'] = perturbed_poses
             alt['world_polygons'] = perturbed_world
@@ -1351,13 +1544,28 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
                 if pi in perturbed_poses:
                     a, c = perturbed_poses[pi]
                     pl['target_center'] = _ensure_Pt(c)
-                    pl['angle'] = a
+                    pl['angle'] = _angle_wrap(a)
+                    source_orientation = float(pl.get('source_orientation', 0.0))
+                    pl['target_orientation'] = _angle_wrap(source_orientation + a)
+                    if pi in perturbed_world:
+                        pl['target_pts'] = perturbed_world[pi]
+                    if 'source_center' in pl:
+                        pl['offset'] = pl['target_center'].sub(pl['source_center'])
             alt['placements'] = alt_placements
             candidates.append(alt)
 
     # Step 3: Texture score each candidate
-    scorer = TextureScorer(mm_per_px=mm_per_px, strip_width_mm=strip_width_mm,
-                          lambda_texture=lambda_texture)
+    scorer = TextureScorer(
+        mm_per_px=mm_per_px,
+        strip_width_mm=strip_width_mm,
+        lambda_texture=lambda_texture,
+        gw=gw,
+        nw=nw,
+        ow=ow,
+        pw=pw,
+        fallback_full_rect_penalty=fallback_full_rect_penalty,
+        fallback_sparse_seam_penalty=fallback_sparse_seam_penalty,
+    )
     results = []
     for i, cs in enumerate(candidates):
         tex = scorer.score_solution(cs, pieces_texture)
@@ -1384,14 +1592,14 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
 
 def rank_candidates_with_texture(geometry_solutions, pieces_texture,
                                *, mm_per_px=10.0, strip_width_mm=5.0,
-                               lambda_texture=0.5):
+                               lambda_texture=0.5, gw=0.35, nw=0.30, ow=0.35, pw=0.45):
     """Rank multiple geometry solutions by texture continuity.
     Returns candidates sorted by J_total (ascending).
     """
     if not geometry_solutions:
         return []
     scorer = TextureScorer(mm_per_px=mm_per_px, strip_width_mm=strip_width_mm,
-                          lambda_texture=lambda_texture)
+                          lambda_texture=lambda_texture, gw=gw, nw=nw, ow=ow, pw=pw)
     results = []
     for sol in geometry_solutions:
         tex = scorer.score_solution(sol, pieces_texture)

@@ -1,4 +1,5 @@
 {
+  "piece_mode": "playing_cards",
   "camera": {
     "width": 1600,
     "height": 1200
@@ -34,17 +35,31 @@
   "segmentation": {
     "mode": "light_on_dark",
     "threshold": 80,
+    "background_distance_threshold": 22,
+    "blue_hue_tolerance_deg": 8,
+    "blue_background_min_saturation": 125,
+    "blue_background_value_margin": 85.0,
+    "foreground_component_min_area_mm2": 30.0,
     "blur_size": 5,
     "morphology_mm": 0.8,
+    "playing_card_noise_open_mm": 0.4,
+    "playing_card_hole_close_mm": 3.0,
     "polygon_epsilon_mm": 1.2,
+    "playing_card_max_polygon_epsilon_mm": 12.0,
+    "rounded_corner_enabled": true,
+    "rounded_corner_min_turn_deg": 6.0,
     "short_edge_mm": 8.0,
-    "collinear_angle_deg": 8.0,
+    "merge_angle_deg": 160.0,
     "max_corner_extension_mm": 20.0,
     "min_piece_area_mm2": 150.0,
     "max_piece_area_mm2": 12000.0
   },
   "solver": {
     "overlap_tolerance_mm": 1.5,
+    "rectangle_short_range_mm": [40.0, 100.0],
+    "rectangle_long_range_mm": [80.0, 130.0],
+    "dimension_tolerance_mm": 3.0,
+    "rectangle_area_tolerance": 0.06,
     "placement_spread_mm": 0.0,
     "local_overlap_avoidance": true,
     "local_overlap_clearance_mm": 4.0,
@@ -52,12 +67,32 @@
     "local_overlap_max_iterations": 8
   },
   "texture": {
-    "enabled": false,
+    "enabled": true,
     "strip_width_mm": 5.0,
     "lambda_texture": 0.5,
     "gradient_weight": 0.35,
     "ncc_weight": 0.3,
-    "orb_weight": 0.35
+    "orb_weight": 0.35,
+    "pattern_weight": 0.45,
+    "candidate_top_k": 7,
+    "candidate_angle_perturb_rad": 0.035,
+    "candidate_translate_perturb_mm": 1.2,
+    "fallback_full_rect_penalty": 0.12,
+    "fallback_sparse_seam_penalty": 0.08
+  },
+  "jqk_template": {
+    "enabled": false,
+    "template_dir": "templates/jqk",
+    "candidate_top_k": 7,
+    "canvas_width_px": 256,
+    "canvas_height_px": 384,
+    "match_orientations_deg": [0, 180],
+    "min_confidence": 0.62,
+    "fallback_to_texture": true,
+    "center_weight": 0.45,
+    "corner_weight": 0.25,
+    "red_weight": 0.15,
+    "black_weight": 0.15
   },
   "scara": {
     "link1_mm": 120.0,

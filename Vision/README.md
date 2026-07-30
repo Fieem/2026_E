@@ -87,6 +87,45 @@ python visual_demo.py --seed 29 --noise 1.0 --output rectangle_demo.png
 
 `1600×1200 图像 → 四点透视矫正 → 二值分割 → 轮廓提取 → 多边形拟合 → 毫米坐标 → 矩形求解`
 
+当前支持两种碎片模式，通过 [vision_config.json](vision_config.json) 里的
+`piece_mode` 切换：
+
+- `plain`：纯色碎片模式，只走几何拼接流程；
+- `playing_cards`：扑克牌碎片模式。使用深蓝背景颜色距离分割，
+  将白底、红蓝色块和黑色牌面统一视为碎片，再进行几何求解、纹理评分，
+  并可选地启用 `jqk_template` 做 J/Q/K 模板重排。
+
+如果只是做当前纯色拼图，建议保持：
+
+```json
+"piece_mode": "plain"
+```
+
+只有在你要开始调试扑克牌纹理拼接时，再切到：
+
+```json
+"piece_mode": "playing_cards"
+```
+
+并同时把 `texture.enabled` 设为 `true`。
+
+如果你正在专门调试人物牌 J/Q/K，可以再额外开启：
+
+```json
+"jqk_template": {
+  "enabled": true
+}
+```
+
+模板文件默认放在 [templates/jqk](templates/jqk/README.md) 中，命名格式为：
+
+- `spade_J.png`
+- `heart_Q.png`
+- `club_K.png`
+
+这条链路当前只用于“在多个几何候选里选出更像 J/Q/K 的拼法”，不会额外输出
+具体是哪一张牌。
+
 ## 树莓派—Gimbal1 串口服务
 
 `vision_serial_service.py` 等待 Gimbal1 通过 USART1 发送 `VISION_START`，
@@ -203,12 +242,20 @@ python3 camera_pipeline.py --source picamera2 --triggered --display
 python3 camera_pipeline.py --source picamera2 --debug --display
 ```
 
-调试窗口包含四个区域：
+纯色模式调试窗口包含四个区域：
 
 - `CORRECTED`：透视矫正后的工作区；
 - `GRAY`：灰度图；
 - `BINARY MASK`：实际送入轮廓提取的二值图；
 - `CONTOURS`：当前二值图检测出的外轮廓。
+
+扑克牌模式下，第二个区域会替换为 `BLUE BACKGROUND MODEL`，
+第四个区域左侧会显示 `CARD FOREGROUND MASK`：
+
+- `BLUE BACKGROUND MODEL`：白色表示被颜色模型判定为深蓝背景；
+- `CARD FOREGROUND MASK`：白色表示最终保留的整块扑克牌。
+
+按 `D` 可将当前四宫格保存到 `output/latest_color_model_debug.png`。
 
 调试时拖动两个滑条：
 
@@ -252,6 +299,9 @@ python3 camera_pipeline.py --source picamera2 --continuous
 | `latest_mask.png` | 碎片二值分割结果 |
 | `latest_result.jpg` | 检测前和目标布局对照图 |
 | `latest_result.json` | 碎片轮廓、目标中心和旋转角 |
+| `latest_jqk_card_preview.png` | 模板重排使用的标准化整牌图 |
+| `latest_jqk_best_template.png` | 当前最佳 J/Q/K 模板 |
+| `latest_jqk_mask_compare.png` | 拼接结果与模板的红/黑花纹对比图 |
 
 只有当 JSON 中的 `status` 为 `ok` 时，机械臂控制程序才允许读取并执行
 `solution.placements`。其他状态都必须保持机械臂停止。
@@ -286,10 +336,23 @@ JSON 中的坐标仍然属于相机工作区坐标，不能未经转换就直接
 | --- | --- |
 | `mode` | `light_on_dark` 表示亮碎片、暗背景 |
 | `threshold` | `0` 表示使用 Otsu 自动阈值，也可以填写固定灰度阈值 |
+| `background_distance_threshold` | 扑克牌模式中，像素与深蓝背景估计值的颜色距离阈值，默认 `28` |
+| `blue_hue_tolerance_deg` | 深蓝背景色相容差，默认 `28°` |
+| `blue_background_min_saturation` | 判定为蓝色背景的最小饱和度 |
+| `blue_background_value_margin` | 允许蓝色背景亮度相对参考值增加的范围 |
+| `foreground_component_min_area_mm2` | 扑克牌模式中删除的小前景噪声面积阈值 |
 | `morphology_mm` | 开闭运算尺度，用于清理小噪点和小孔洞 |
 | `polygon_epsilon_mm` | 多边形角点拟合容差 |
+| `playing_card_max_polygon_epsilon_mm` | 扑克牌模式的最大拟合容差，默认 `12`，用于消除印刷边缘造成的伪角点 |
+| `rounded_corner_enabled` | 是否在扑克牌模式合并圆角产生的连续小边 |
+| `rounded_corner_min_turn_deg` | 连续小转角的最小角度，默认 `6°` |
 | `short_edge_mm` | 小于该长度的边视为伪短边，并用两侧边的延长线求角点 |
-| `collinear_angle_deg` | 相邻边转角小于该值时合并为一条边 |
+| `merge_angle_deg` | 相邻两条边的夹角大于该值时，视为同一条直边并合并，推荐先试 `165°～175°` |
 | `max_corner_extension_mm` | 短边修复时允许角点延长的最大距离 |
 | `min_piece_area_mm2` | 最小碎片面积，小于该值的轮廓会被忽略 |
 | `max_piece_area_mm2` | 最大碎片面积，大于该值的轮廓会被忽略 |
+
+扑克牌模式还会对明显超过 5 个角点的接触轮廓执行距离变换和分水岭拆分，
+用于处理两块碎片边角相碰的情况。若调试图中已经得到 4 块碎片但仍然显示
+“矩形求解失败”，问题就进入接缝匹配阶段，应继续查看 `latest_result.json`
+中的 `diagnostics`，而不是继续调灰度阈值。
