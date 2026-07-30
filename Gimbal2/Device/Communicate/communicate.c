@@ -65,7 +65,7 @@ static void comm_pi_parse_line(const char *line)
     char *saveptr = NULL;
     strncpy(work, line, sizeof(work) - 1);
     work[sizeof(work) - 1] = '\0';
-
+    //printsf(0, "RAW: %s", work);
     char *cmd = strtok_r(work, ",", &saveptr);
     if (cmd == NULL) return;
 
@@ -138,6 +138,7 @@ void comm_pi_poll(void)
 {
     uint8_t ch;
     while (comm_pi_ring_pop(&ch)) {
+        printsf(0, "RX: 0x%02X '%c'", ch, (ch >= 32 && ch <= 126) ? ch : '?');
         comm_pi_feed_byte(ch);
     }
 }
