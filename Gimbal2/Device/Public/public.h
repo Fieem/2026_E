@@ -58,5 +58,5 @@ extern ArmState_t arm_state;
 extern bool    comm_task_ready;
 extern float   comm_angle1;
 extern float   comm_angle2;
-
+extern bool    comm_win_flag;
 #endif //INC_2024E_PUBLIC_H
