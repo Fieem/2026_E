@@ -47,8 +47,8 @@
     "overlap_tolerance_mm": 1.5,
     "placement_spread_mm": 0.0,
     "local_overlap_avoidance": true,
-    "local_overlap_clearance_mm": 2.0,
-    "local_overlap_step_mm": 1.5,
+    "local_overlap_clearance_mm": 7.0,
+    "local_overlap_step_mm": 3.5,
     "local_overlap_max_iterations": 8
   },
   "texture": {
