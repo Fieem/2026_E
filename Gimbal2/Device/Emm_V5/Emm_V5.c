@@ -1785,12 +1785,12 @@ void Move_Pos(int32_t x, int32_t y)
     uint32_t target_pitch = (uint32_t)abs(y);
 
     /* ---- 按行程比例分配速度，使两轴基本同时到达 ---- */
-    uint32_t max_delta   = (abs(x - last_pos_yaw) + abs(y - last_pos_pitch));
-    uint16_t base_speed  = 50U;    /* 合成速度上限（RPM），按需调整 */
+    // uint32_t max_delta   = (abs(x - last_pos_yaw) + abs(y - last_pos_pitch));
+    // uint16_t base_speed  = 50U;    /* 合成速度上限（RPM），按需调整 */
     uint8_t  base_acc    = 10U;
 
-    uint16_t vel_yaw   = 20U;      /* 默认值 */
-    uint16_t vel_pitch = 20U;
+    // uint16_t vel_yaw   = 20U;      /* 默认值 */
+    // uint16_t vel_pitch = 20U;
 
     // if (max_delta > 0U) {
     //     vel_yaw   = (uint16_t)((uint64_t)base_speed

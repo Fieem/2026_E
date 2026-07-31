@@ -132,8 +132,7 @@ static int test_vofa_apply_kv(const char *key, float value) {
         return 1;
     }
     if (test_key_equal(key, "ON")) {
-        //Magnet_ON();
-        comm_send_ready();
+        Magnet_ON();
         printsf(0,"ON");
         // printsf(0,"NEW");
         // Emm_V5_Modify_PID_Params(1,true,18000,0,1024000);
@@ -143,6 +142,16 @@ static int test_vofa_apply_kv(const char *key, float value) {
     if (test_key_equal(key, "OFF")) {
         Magnet_OFF();
         printsf(0,"OFF");
+        return 1;
+    }
+    if (test_key_equal(key, "READY")) {
+        comm_send_ready();
+        printsf(0,"READY");
+        return 1;
+    }
+    if (test_key_equal(key, "OK")) {
+        comm_send_ok();
+        printsf(0,"OK");
         return 1;
     }
     if (test_key_equal(key, "LOW")) {

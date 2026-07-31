@@ -16,9 +16,9 @@
 #define PULSES_PER_REV      6400U
 #define PULSES_TO_DEG(p)    ((float)(p) * 360.0f / (float)PULSES_PER_REV)
 
-/* ---- 全局变量 ---- */
-extern int32_t last_pos_yaw;
-extern int32_t last_pos_pitch;
+/* ---- 全局变量（motor_task / test_task 共享，ISR 外读写，加 volatile 防缓存）---- */
+extern volatile int32_t last_pos_yaw;
+extern volatile int32_t last_pos_pitch;
 
 /* ---- 机械臂命令类型 ---- */
 typedef enum {
@@ -42,17 +42,19 @@ typedef enum {
     ARM_DONE,                   /* 发 FINISH → IDLE              */
 } ArmState_t;
 
-/* ---- 命令结构体 ---- */
-typedef struct {
-    ArmCmdType_t type;
-    float        pick_x;        /* 初始位置 电机1 (度，小数) */
-    float        pick_y;        /* 初始位置 电机2 (度，小数) */
-    float        place_x;       /* 放置位置 电机1 (度，小数) */
-    float        place_y;       /* 放置位置 电机2 (度，小数) */
-} ArmCmd_t;
+/* ---- 机械臂状态/命令（receive_task ↔ motor_task 跨任务共享）----
+ * 禁止直接访问底层变量，一律通过下列 API：
+ * 内部用临界区保证 "检查状态 → 写命令" 与 "取命令 → 切状态" 均为原子操作，
+ * 避免编译器缓存和两任务交错执行导致的半更新/重复投递。 */
+ArmState_t Arm_GetState(void);
+void       Arm_SetState(ArmState_t new_state);
 
-extern ArmCmd_t   arm_cmd;
-extern ArmState_t arm_state;
+/* receive_task 发布命令：仅在对应状态且邮箱为空时生效，返回 true=已受理 */
+bool Arm_TryPostPick(float x, float y);    /* ARM_IDLE       + 邮箱空 → CMD_TASK  */
+bool Arm_TryPostPlace(float x, float y);   /* ARM_WAIT_PLACE + 邮箱空 → CMD_PLACE */
+
+/* motor_task 取走命令：匹配 expect 时取出坐标并原子切换到 new_state */
+bool Arm_TakeCmd(ArmCmdType_t expect, ArmState_t new_state, float *x, float *y);
 
 /* ---- TASK 协议解析结果（每次 2 个角度值）---- */
 extern bool    comm_task_ready;

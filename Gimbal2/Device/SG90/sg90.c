@@ -56,6 +56,49 @@ uint8_t CalcPickAngle(float angle)
     float curved = powf(ratio, COMP_CURVE_EXP);
     return (uint8_t)(COMP_LOW_MIN + curved * (COMP_LOW_MAX - COMP_LOW_MIN) + 0.5f);
 }
+/* ---- 舵机下垂补偿查表（每10°一个区间）---- */
+typedef struct {
+    uint8_t angle_min;    /* 区间下限(包含) */
+    uint8_t servo;        /* 对应舵机角度   */
+} PickLutEntry_t;
+
+static const PickLutEntry_t s_pick_lut[] = {
+    { 40,  70 },   /*  40°- 49° */
+    { 50,  85 },   /*  50°- 59° */
+    { 60, 102 },   /*  60°- 69° */
+    { 70, 117 },   /*  70°- 79° */
+    { 80, 129 },   /*  80°- 89° */
+    { 90, 140 },   /*  90°- 99° */
+    { 100, 151 },  /* 100°-109° */
+    { 110, 161 },  /* 110°-119° */
+};
+#define PICK_LUT_SIZE  (sizeof(s_pick_lut) / sizeof(s_pick_lut[0]))
+
+/**
+  * @brief  查表计算舵机下降角度（每10°一个区间）
+  * @param  angle ：电机角度(度)，范围 ±180
+  * @retval 舵机角度 0~180
+  */
+uint8_t CalcPickAngleLut(float angle)
+{
+    float abs_angle = (angle >= 0.0f) ? angle : -angle;
+
+    /* 范围外钳位 */
+    if (abs_angle <= (float)s_pick_lut[0].angle_min)
+        return s_pick_lut[0].servo;
+    if (abs_angle >= (float)(s_pick_lut[PICK_LUT_SIZE - 1].angle_min + 10U))
+        return COMP_LOW_MAX;
+
+    /* 从后往前找第一个 angle >= 区间下限 */
+    int i;
+    for (i = (int)PICK_LUT_SIZE - 1; i >= 0; i--) {
+        if (abs_angle >= (float)s_pick_lut[i].angle_min) {
+            return s_pick_lut[i].servo;
+        }
+    }
+    return s_pick_lut[0].servo;  /* fallback */
+}
+
 /**********************************************************
   ***   电磁铁驱动
   ***   引脚：PA5 (Magnet)

@@ -22,17 +22,11 @@ void StartReceiveTask(void *argument)
         if (comm_task_ready) {
             comm_task_ready = false;
 
-            if (arm_state == ARM_IDLE && arm_cmd.type == CMD_NONE) {
-                /* 第一段 TASK → 初始位置 */
-                arm_cmd.pick_x = comm_angle1;
-                arm_cmd.pick_y = comm_angle2;
-                arm_cmd.type   = CMD_TASK;
-            }
-            else if (arm_state == ARM_WAIT_PLACE && arm_cmd.type == CMD_NONE) {
-                /* 第二段 TASK → 放置位置 */
-                arm_cmd.place_x = comm_angle1;
-                arm_cmd.place_y = comm_angle2;
-                arm_cmd.type    = CMD_PLACE;
+            /* 先尝试作为第一段 TASK（抓取点），不在 IDLE 则尝试第二段（放置点）；
+             * 状态校验与写入在同一临界区内完成，两边都不受理说明时序错位，丢弃并提示 */
+            if (!Arm_TryPostPick(comm_angle1, comm_angle2) &&
+                !Arm_TryPostPlace(comm_angle1, comm_angle2)) {
+                printsf(0, "TASK DROP");
             }
         }
 
