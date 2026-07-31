@@ -22,7 +22,6 @@ void StartMotorTask(void *argument)
     Emm_V5_Origin_Trigger_Return(2, 0, false);
     osDelay(1000);
 
-    HAL_GPIO_TogglePin(GPIOF, GPIO_PIN_9);
 
     /* 任务局部缓存：当前抓取点坐标（供 CalcPickAngle 使用） */
     static float s_pick_x = 0.0f;
