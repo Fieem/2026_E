@@ -26,7 +26,8 @@ void comm_pi_poll(void);
 void comm_pi_ring_push(uint8_t byte);
 
 /* ---- 发送 ---- */
-void comm_send_ready(void);
+void comm_send_ready(void);     //对应模式1 矩形拼接
+void comm_send_ok(void);        //对应模式2 扑克牌拼接
 void comm_send_pick(void);
 void comm_send_finish(void);
 

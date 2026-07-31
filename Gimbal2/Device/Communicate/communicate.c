@@ -95,6 +95,9 @@ static void comm_pi_parse_line(const char *line)
         comm_win_flag = true;
         printsf(0, "WIN");
     }
+    else if (strcmp_upper(cmd, "START") == 0) {
+        printsf(0, "START");
+    }
     /* 未知命令 → 静默忽略 */
 }
 
@@ -147,6 +150,12 @@ void comm_pi_poll(void)
 void comm_send_ready(void)
 {
     const char *msg = "READY\n";
+    HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
+}
+
+void comm_send_ok(void)
+{
+    const char *msg = "OK\n";
     HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
 }
 
