@@ -23,10 +23,10 @@
 
 /* ---- 舵机下垂补偿（电机角度绝对值越大→下垂越小→下降角度越大）---- */
 #define COMP_ANGLE_MIN   40     /* 电机角度=0°(下垂最严重) */
-#define COMP_ANGLE_MAX   120    /* 电机角度=±60°(下垂最轻微，之后饱和) */
+#define COMP_ANGLE_MAX   120    /* 电机角度=±120°(下垂最轻微，之后饱和) */
 #define COMP_LOW_MIN     70   /* 下垂最严重时的舵机角度 */
 #define COMP_LOW_MAX     175   /* 下垂最轻微时的舵机角度 */
-#define COMP_CURVE_EXP   0.5f  /* 曲线指数: >1=开头缓结尾陡, <1=开头陡结尾缓, 1=线性 */
+#define COMP_CURVE_EXP   0.7f  /* 曲线指数: >1=开头缓结尾陡, <1=开头陡结尾缓, 1=线性 */
 /**
   * @brief  SG90 初始化，开启 PWM 输出
   * @param  无
@@ -41,7 +41,8 @@ void SG90_Init(void);
   */
 void SG90_SetAngle(uint8_t angle);
 
-uint8_t CalcPickAngle(float angle);   /* 根据第一个电机旋转度数计算舵机下降角度 */
+uint8_t CalcPickAngle(float angle);   /* 根据电机角度计算舵机下降角度（曲线版） */
+uint8_t CalcPickAngleLut(float angle); /* 根据电机角度查表计算舵机下降角度（区间版） */
 
 
 /**********************************************************
