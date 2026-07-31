@@ -1,4 +1,4 @@
-"""J/Q/K 扑克牌模板匹配工具。"""
+"""扑克牌模板匹配工具，支持 A~10 / J / Q / K。"""
 
 from __future__ import annotations
 
@@ -34,6 +34,9 @@ SUPPORTED_TEMPLATE_SUFFIXES: Tuple[str, ...] = (".jpg", ".jpeg", ".png")
 @dataclass(frozen=True)
 class TemplateFeature:
     name: str
+    rank: str
+    rank_group: str
+    suit_color: str
     image: np.ndarray
     red_mask: np.ndarray
     black_mask: np.ndarray
@@ -50,6 +53,29 @@ class CardFeature:
     ink_mask: np.ndarray
     white_mask: np.ndarray
     edge_mask: np.ndarray
+
+
+def _template_suit_color_from_name(template_name: str) -> str:
+    suit = template_name.split("_", 1)[0].lower()
+    if suit in ("heart", "diamond"):
+        return "red"
+    if suit in ("spade", "club"):
+        return "black"
+    return "unknown"
+
+
+def _template_rank_from_name(template_name: str) -> str:
+    parts = template_name.split("_", 1)
+    return parts[1].upper() if len(parts) == 2 else ""
+
+
+def _rank_group(rank: str) -> str:
+    normalized = str(rank).upper()
+    if normalized in ("J", "Q", "K"):
+        return "face"
+    if normalized in RANK_SORT_ORDER:
+        return "number"
+    return "unknown"
 
 
 def expected_template_files() -> List[str]:
@@ -186,14 +212,17 @@ def _extract_card_feature(
     )
     if merge_chromatic_into_black:
         black_mask = cv2.bitwise_or(black_mask, chromatic_mask)
+    # 牌面底色可能因灯光变成绿色/青色。不能把整块底色当作 ink，
+    # 否则数字牌的黑色点数会被大面积彩色背景淹没。红色已经由
+    # red_mask 单独提取，其余彩色细节只在满足黑色阈值时进入 ink。
+    # 模板中的彩色细节如果需要保留，会通过 merge_chromatic_into_black
+    # 合并进模板 black_mask，再进入模板 ink_mask。
     ink_mask = (
         (
             (red_mask > 0)
             | (black_mask > 0)
-            | (chromatic_mask > 0)
-            | ((max_delta_from_white >= 40) & (gray <= 238))
-            | ((saturation >= 64) & (value <= 220) & (chroma_span >= 20))
-            | (gray <= 170)
+            | ((max_delta_from_white >= 40) & (gray <= 205) & (saturation <= 72))
+            | (gray <= 125)
         ).astype(np.uint8)
         * 255
     )
@@ -225,6 +254,29 @@ def _extract_card_feature(
     )
 
 
+def _dominant_card_color_hint(
+    card: CardFeature,
+    rank_roi: np.ndarray,
+    corner_roi: np.ndarray,
+) -> str:
+    """根据角标区域估计当前牌更像红牌还是黑牌。"""
+
+    focus_roi = cv2.bitwise_or(rank_roi, corner_roi) > 0
+    if not np.any(focus_roi):
+        return "unknown"
+
+    red_count = int(np.count_nonzero((card.red_mask > 0) & focus_roi))
+    black_count = int(np.count_nonzero((card.black_mask > 0) & focus_roi))
+    total = red_count + black_count
+    if total < 12:
+        return "unknown"
+    if red_count >= black_count * 1.35:
+        return "red"
+    if black_count >= red_count * 1.35:
+        return "black"
+    return "unknown"
+
+
 @lru_cache(maxsize=8)
 def _load_template_bank_cached(
     template_dir_text: str,
@@ -247,6 +299,9 @@ def _load_template_bank_cached(
         features.append(
             TemplateFeature(
                 name=template_name,
+                rank=_template_rank_from_name(template_name),
+                rank_group=_rank_group(_template_rank_from_name(template_name)),
+                suit_color=_template_suit_color_from_name(template_name),
                 image=card.image,
                 red_mask=card.red_mask,
                 black_mask=card.black_mask,
@@ -473,6 +528,80 @@ def _detail_roi_masks(
     return portrait_blocks, letter_mask, suit_mask, top_band, bottom_band, border_band
 
 
+def _coarse_rank_group_hint(
+    card: CardFeature,
+    templates: Sequence[TemplateFeature],
+    portrait_roi: np.ndarray,
+    portrait_blocks: Sequence[np.ndarray],
+    top_band_roi: np.ndarray,
+    bottom_band_roi: np.ndarray,
+    margin: float,
+) -> Dict[str, float | str]:
+    """先粗判当前整牌更像人物牌还是数字牌，减少跨类型误匹配。"""
+
+    best_scores: Dict[str, float] = {"face": 0.0, "number": 0.0}
+    best_names: Dict[str, str] = {"face": "", "number": ""}
+
+    for template in templates:
+        if template.rank_group not in ("face", "number"):
+            continue
+        full_ink = _mask_f1_score(card.ink_mask, template.ink_mask)
+        full_edge = _edge_distance_score(card.edge_mask, template.edge_mask)
+        portrait_ink = _mask_f1_score(card.ink_mask, template.ink_mask, portrait_roi)
+        portrait_edge = _edge_distance_score(
+            card.edge_mask,
+            template.edge_mask,
+            portrait_roi,
+        )
+        portrait_block_edge = _mean_edge_distance_score(
+            card.edge_mask,
+            template.edge_mask,
+            portrait_blocks,
+        )
+        top_band_ink = _mask_f1_score(card.ink_mask, template.ink_mask, top_band_roi)
+        bottom_band_ink = _mask_f1_score(
+            card.ink_mask,
+            template.ink_mask,
+            bottom_band_roi,
+        )
+
+        # 粗分类阶段必须使用同一套权重比较两类模板。
+        # 原来 face 和 number 使用不同权重，比较出来的分数不在同一
+        # 个尺度上，数字牌的复杂黑色花纹很容易被误判成人头牌。
+        coarse_score = (
+            0.22 * full_ink
+            + 0.16 * full_edge
+            + 0.12 * portrait_ink
+            + 0.12 * portrait_edge
+            + 0.08 * portrait_block_edge
+            + 0.15 * top_band_ink
+            + 0.15 * bottom_band_ink
+        )
+
+        if coarse_score > best_scores[template.rank_group]:
+            best_scores[template.rank_group] = float(coarse_score)
+            best_names[template.rank_group] = template.name
+
+    face_score = float(best_scores["face"])
+    number_score = float(best_scores["number"])
+    if face_score - number_score >= float(margin):
+        hint = "face"
+    elif number_score - face_score >= float(margin):
+        hint = "number"
+    else:
+        hint = "unknown"
+
+    return {
+        "hint": hint,
+        "face_score": face_score,
+        "number_score": number_score,
+        "confidence": max(face_score, number_score),
+        "margin": abs(face_score - number_score),
+        "face_template": best_names["face"],
+        "number_template": best_names["number"],
+    }
+
+
 def _mean_mask_f1_score(
     first: np.ndarray,
     second: np.ndarray,
@@ -575,6 +704,9 @@ def match_card_to_templates(
     corner_weight: float,
     red_weight: float,
     black_weight: float,
+    rank_group_prefilter_enabled: bool = True,
+    rank_group_prefilter_margin: float = 0.025,
+    rank_group_prefilter_min_score: float = 0.56,
 ) -> Dict:
     template_bank = load_template_bank(
         template_dir,
@@ -599,15 +731,55 @@ def match_card_to_templates(
         canvas_width_px, canvas_height_px
     )
     border_eval_roi = cv2.bitwise_and(border_band_roi, cv2.bitwise_not(corner_roi))
+    color_hint = _dominant_card_color_hint(card, rank_roi, corner_roi)
+    rank_group_info = _coarse_rank_group_hint(
+        card,
+        templates,
+        portrait_roi,
+        portrait_blocks,
+        top_band_roi,
+        bottom_band_roi,
+        rank_group_prefilter_margin,
+    )
+    # 粗分类只在“分数足够高且类别差距明显”时用于预筛选。
+    # 低质量拼接图、碎片缺失或花纹被遮挡时保留两类模板，避免数字牌
+    # 因一次不可靠的 face 判断而永远失去数字模板。
+    rank_group_hint = "unknown"
+    if (
+        rank_group_prefilter_enabled
+        and str(rank_group_info["hint"]) in ("face", "number")
+        and float(rank_group_info["confidence"]) >= float(rank_group_prefilter_min_score)
+        and float(rank_group_info["margin"]) >= float(rank_group_prefilter_margin)
+    ):
+        rank_group_hint = str(rank_group_info["hint"])
+    filtered_templates = [
+        template
+        for template in templates
+        if (color_hint == "unknown" or template.suit_color == color_hint)
+        and (rank_group_hint == "unknown" or template.rank_group == rank_group_hint)
+    ]
+    if not filtered_templates:
+        filtered_templates = [
+            template
+            for template in templates
+            if color_hint == "unknown" or template.suit_color == color_hint
+        ]
+    if not filtered_templates:
+        filtered_templates = list(templates)
 
-    all_scores: List[Dict] = []
     best_payload: Dict | None = None
+    second_best_payload: Dict | None = None
     best_oriented_card: CardFeature | None = None
     best_template: TemplateFeature | None = None
 
     for orientation_deg in match_orientations_deg:
         oriented_card = _rotate_card_feature(card, int(orientation_deg))
-        for template in templates:
+        for template in filtered_templates:
+            full_ink = _mask_f1_score(oriented_card.ink_mask, template.ink_mask)
+            full_edge = _edge_distance_score(
+                oriented_card.edge_mask,
+                template.edge_mask,
+            )
             center_ink = _mask_f1_score(oriented_card.ink_mask, template.ink_mask, center_roi)
             center_edge = _edge_distance_score(
                 oriented_card.edge_mask,
@@ -647,16 +819,6 @@ def match_card_to_templates(
                 template.black_mask,
                 border_eval_roi,
             )
-            center_score = (
-                0.06 * center_ink
-                + 0.08 * center_edge
-                + 0.08 * portrait_ink
-                + 0.18 * portrait_edge
-                + 0.12 * portrait_block_ink
-                + 0.26 * portrait_block_edge
-            )
-            center_score += 0.02 * top_band_ink + 0.02 * bottom_band_ink
-
             corner_ink = _mask_f1_score(oriented_card.ink_mask, template.ink_mask, corner_roi)
             corner_edge = _edge_distance_score(
                 oriented_card.edge_mask,
@@ -694,18 +856,57 @@ def match_card_to_templates(
                 template.edge_mask,
                 suit_roi,
             )
-            corner_score = (
-                0.14 * corner_ink
-                + 0.11 * corner_edge
-                + 0.13 * rank_red
-                + 0.13 * rank_black
-                + 0.10 * rank_edge
-                + 0.10 * letter_ink
-                + 0.10 * letter_edge
-                + 0.05 * suit_ink
-                + 0.05 * suit_edge
-                + 0.50 * border_black
-            )
+            if template.rank_group == "face":
+                center_score = (
+                    0.06 * center_ink
+                    + 0.08 * center_edge
+                    + 0.08 * portrait_ink
+                    + 0.18 * portrait_edge
+                    + 0.12 * portrait_block_ink
+                    + 0.26 * portrait_block_edge
+                )
+                center_score += 0.02 * top_band_ink + 0.02 * bottom_band_ink
+                corner_score = (
+                    0.14 * corner_ink
+                    + 0.11 * corner_edge
+                    + 0.13 * rank_red
+                    + 0.13 * rank_black
+                    + 0.10 * rank_edge
+                    + 0.10 * letter_ink
+                    + 0.10 * letter_edge
+                    + 0.05 * suit_ink
+                    + 0.05 * suit_edge
+                    + 0.50 * border_black
+                )
+                # face 分支的权重和原先分别为 0.82、1.31，直接参与总分
+                # 会系统性抬高人头牌。归一化后才能和 number 公平比较。
+                center_score /= 0.82
+                corner_score /= 1.31
+            else:
+                center_score = (
+                    0.22 * full_ink
+                    + 0.20 * full_edge
+                    + 0.18 * center_ink
+                    + 0.14 * center_edge
+                    + 0.10 * top_band_ink
+                    + 0.10 * bottom_band_ink
+                    + 0.03 * portrait_block_ink
+                    + 0.03 * portrait_block_edge
+                )
+                corner_score = (
+                    0.10 * corner_ink
+                    + 0.08 * corner_edge
+                    + 0.16 * rank_red
+                    + 0.16 * rank_black
+                    + 0.16 * rank_edge
+                    + 0.12 * letter_ink
+                    + 0.10 * letter_edge
+                    + 0.06 * suit_ink
+                    + 0.06 * suit_edge
+                    + 0.12 * border_black
+                )
+                # number 分支权重和分别为 1.00、0.96，同样显式归一化。
+                corner_score /= 0.96
 
             red_score = _mask_f1_score(oriented_card.red_mask, template.red_mask)
             black_score = _mask_f1_score(oriented_card.black_mask, template.black_mask)
@@ -718,8 +919,12 @@ def match_card_to_templates(
 
             payload = {
                 "template_name": template.name,
+                "template_rank": template.rank,
+                "template_rank_group": template.rank_group,
                 "orientation_deg": int(orientation_deg),
                 "score": float(total_score),
+                "full_ink_score": float(full_ink),
+                "full_edge_score": float(full_edge),
                 "center_score": float(center_score),
                 "corner_score": float(corner_score),
                 "portrait_ink_score": float(portrait_ink),
@@ -740,23 +945,37 @@ def match_card_to_templates(
                 "red_score": float(red_score),
                 "black_score": float(black_score),
             }
-            all_scores.append(payload)
             if best_payload is None or payload["score"] > best_payload["score"]:
+                second_best_payload = best_payload
                 best_payload = payload
                 best_oriented_card = oriented_card
                 best_template = template
+            elif (
+                second_best_payload is None
+                or payload["score"] > second_best_payload["score"]
+            ):
+                second_best_payload = payload
 
-    all_scores.sort(key=lambda item: item["score"], reverse=True)
     if best_payload is None or best_oriented_card is None or best_template is None:
         return {
             "error": "template_match_failed",
             "loaded_template_count": len(templates),
             "missing_templates": template_bank["missing_templates"],
         }
+    second_best_score = (
+        float(second_best_payload["score"])
+        if isinstance(second_best_payload, dict)
+        else 0.0
+    )
     return {
         "best_name": best_payload["template_name"],
+        "best_rank": best_payload["template_rank"],
+        "best_rank_group": best_payload["template_rank_group"],
         "best_score": float(best_payload["score"]),
+        "second_best_score": second_best_score,
         "best_orientation_deg": int(best_payload["orientation_deg"]),
+        "full_ink_score": float(best_payload["full_ink_score"]),
+        "full_edge_score": float(best_payload["full_edge_score"]),
         "center_score": float(best_payload["center_score"]),
         "corner_score": float(best_payload["corner_score"]),
         "portrait_ink_score": float(best_payload["portrait_ink_score"]),
@@ -776,6 +995,15 @@ def match_card_to_templates(
         "red_score": float(best_payload["red_score"]),
         "black_score": float(best_payload["black_score"]),
         "loaded_template_count": len(templates),
+        "compared_template_count": len(filtered_templates),
+        "card_color_hint": color_hint,
+        "card_rank_group_hint": rank_group_hint,
+        "coarse_face_score": float(rank_group_info["face_score"]),
+        "coarse_number_score": float(rank_group_info["number_score"]),
+        "coarse_rank_group_confidence": float(rank_group_info["confidence"]),
+        "coarse_rank_group_margin": float(rank_group_info["margin"]),
+        "coarse_face_template": str(rank_group_info["face_template"]),
+        "coarse_number_template": str(rank_group_info["number_template"]),
         "missing_templates": template_bank["missing_templates"],
         "card_preview": best_oriented_card.image,
         "template_preview": best_template.image,

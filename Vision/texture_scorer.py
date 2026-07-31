@@ -324,6 +324,35 @@ def minimum_area_rectangle(points: Sequence[Pt]) -> Optional[Dict]:
     return best
 
 
+def _polygon_outside_rectangle_penalty(
+    polygon: Sequence[Pt],
+    rectangle: Optional[Dict],
+    margin_mm: float = 0.0,
+) -> float:
+    """估计多边形顶点跑出参考矩形的程度，返回毫米级软罚分。"""
+
+    if rectangle is None or not polygon:
+        return 0.0
+    center = rectangle.get("center")
+    width = float(rectangle.get("width", 0.0))
+    height = float(rectangle.get("height", 0.0))
+    angle = float(rectangle.get("angle", 0.0))
+    if center is None or width <= EPS or height <= EPS:
+        return 0.0
+
+    half_w = width * 0.5 + max(0.0, float(margin_mm))
+    half_h = height * 0.5 + max(0.0, float(margin_mm))
+    total_penalty = 0.0
+    for point in polygon:
+        local = point.sub(center).rotate(-angle)
+        overflow_x = max(0.0, abs(local.x) - half_w)
+        overflow_y = max(0.0, abs(local.y) - half_h)
+        if overflow_x <= EPS and overflow_y <= EPS:
+            continue
+        total_penalty += math.hypot(overflow_x, overflow_y)
+    return float(total_penalty)
+
+
 def _edge(points: Sequence[Pt], index: int) -> Tuple[Pt, Pt]:
     return points[index], points[(index + 1) % len(points)]
 
@@ -550,6 +579,7 @@ def _edge_alignment_translations_for_fixed_angle(
     moving_end: Pt,
     minimum_contact: float,
     reverse_direction: bool = True,
+    slide_fractions: Sequence[float] = (),
 ) -> List[Tuple[Pt, float, float]]:
     fixed_direction = fixed_end.sub(fixed_start)
     moving_direction = moving_end.sub(moving_start)
@@ -578,6 +608,20 @@ def _edge_alignment_translations_for_fixed_angle(
         ]
 
     axis = fixed_direction.scale(1.0 / fixed_length)
+    extra_centers: List[Pt] = []
+    for base_center in list(centers):
+        for fraction in slide_fractions:
+            try:
+                fraction_value = float(fraction)
+            except (TypeError, ValueError):
+                continue
+            if abs(fraction_value) <= 1e-9:
+                continue
+            shift = axis.scale(min(fixed_length, moving_length) * fraction_value)
+            extra_centers.append(base_center.add(shift))
+            extra_centers.append(base_center.sub(shift))
+    centers.extend(extra_centers)
+
     results: List[Tuple[Pt, float, float]] = []
     seen = set()
     for center in centers:
@@ -2062,6 +2106,12 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
                        equilateral_triangle_relative_tolerance=0.0,
                        equilateral_triangle_rotation_angles_deg=None,
                        equilateral_triangle_shape_penalty=0.0,
+                       equilateral_triangle_rotation_minimum_contact_scale=0.55,
+                       equilateral_triangle_rotation_slide_fractions=(),
+                       equilateral_triangle_rotation_overlap_extra_mm=0.0,
+                       equilateral_triangle_rotation_frame_margin_mm=0.0,
+                       equilateral_triangle_rotation_hard_frame_constraint=False,
+                       equilateral_triangle_rotation_outside_penalty_weight=0.0,
                        angle_perturb_rad=0.035,
                        translate_perturb_mm=1.2):
     """Geometry candidate solver with optional texture re-ranking.
@@ -2154,6 +2204,7 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
             "no_alignment_centers": 0,
             "overlap": 0,
             "invalid_rectangle": 0,
+            "outside_reference_frame": 0,
         },
         "reject_samples": [],
     }
@@ -2218,6 +2269,7 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
         desired_angle = _angle_wrap(current_angle + math.radians(angle_deg))
         best_alt = None
         best_alt_score = float("inf")
+        reference_rectangle = current_candidate.get("rectangle")
         missing_fixed_polygon_count = 0
         no_alignment_centers_count = 0
         overlap_count = 0
@@ -2241,7 +2293,7 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
                 ].rotate(desired_angle)
                 minimum_contact = max(
                     5.0,
-                    0.55
+                    float(equilateral_triangle_rotation_minimum_contact_scale)
                     * min(
                         fixed_start.dist(fixed_end),
                         moving_start.dist(moving_end),
@@ -2254,6 +2306,7 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
                     moving_end,
                     minimum_contact,
                     True,
+                    slide_fractions=equilateral_triangle_rotation_slide_fractions,
                 )
                 if not centers:
                     no_alignment_centers_count += 1
@@ -2272,7 +2325,8 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
                         polygons_overlap(
                             rotated_triangle,
                             polygon,
-                            float(geometry_kwargs.get("overlap_tolerance_mm", 1.5)),
+                            float(geometry_kwargs.get("overlap_tolerance_mm", 1.5))
+                            + max(0.0, float(equilateral_triangle_rotation_overlap_extra_mm)),
                         )
                         for idx, polygon in current_world.items()
                         if idx != triangle_index
@@ -2311,11 +2365,31 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
                         invalid_rectangle_count += 1
                         continue
                     area_error = abs(rectangle["area"] - total_piece_area) / rectangle["area"]
+                    outside_penalty_mm = _polygon_outside_rectangle_penalty(
+                        rotated_triangle,
+                        reference_rectangle,
+                        equilateral_triangle_rotation_frame_margin_mm,
+                    )
+                    if (
+                        equilateral_triangle_rotation_hard_frame_constraint
+                        and outside_penalty_mm > 1e-6
+                    ):
+                        _record_rotation_reject(
+                            "outside_reference_frame",
+                            (
+                                f"piece={int(triangle_index)}, "
+                                f"angle={int(round(angle_deg))}, "
+                                f"outside_mm={outside_penalty_mm:.3f}"
+                            ),
+                        )
+                        continue
                     local_score = (
                         area_error
                         + 0.22 * max(0, 2 - min(2, contact_count))
                         + 0.04 * avg_gap
                         + 0.0015 * _ensure_Pt(center).dist(_ensure_Pt(current_center))
+                        + float(equilateral_triangle_rotation_outside_penalty_weight)
+                        * outside_penalty_mm
                         - 0.002 * min(contact_overlap, 25.0)
                     )
                     if local_score >= best_alt_score:

@@ -36,23 +36,13 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="1f7f0edf-0229-41fd-adbd-51ee79e766d0" name="更改" comment="Gimbal1_init">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/App/gimbal2_link.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/App/gimbal2_link.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/App/gimbal2_link.h" beforeDir="false" afterPath="$PROJECT_DIR$/App/gimbal2_link.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/App/gimbal_task.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/App/gimbal_task.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/App/scara_protocol.h" beforeDir="false" afterPath="$PROJECT_DIR$/App/scara_protocol.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/App/vision_comm.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/App/vision_comm.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/SCARA_J1.md" beforeDir="false" afterPath="$PROJECT_DIR$/SCARA_J1.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../Gimbal2/App/receive_task.c" beforeDir="false" afterPath="$PROJECT_DIR$/../Gimbal2/App/receive_task.c" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../Gimbal2/Device/Communicate/communicate.c" beforeDir="false" afterPath="$PROJECT_DIR$/../Gimbal2/Device/Communicate/communicate.c" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../Gimbal2/Device/Communicate/communicate.h" beforeDir="false" afterPath="$PROJECT_DIR$/../Gimbal2/Device/Communicate/communicate.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../Gimbal2/Device/Public/public.c" beforeDir="false" afterPath="$PROJECT_DIR$/../Gimbal2/Device/Public/public.c" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../Gimbal2/Device/Public/public.h" beforeDir="false" afterPath="$PROJECT_DIR$/../Gimbal2/Device/Public/public.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../Vision/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/../Vision/README.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/../Vision/camera_pipeline.py" beforeDir="false" afterPath="$PROJECT_DIR$/../Vision/camera_pipeline.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../Vision/serial_protocol.py" beforeDir="false" afterPath="$PROJECT_DIR$/../Vision/serial_protocol.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/../Vision/jqk_template_matcher.py" beforeDir="false" afterPath="$PROJECT_DIR$/../Vision/jqk_template_matcher.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/../Vision/texture_scorer.py" beforeDir="false" afterPath="$PROJECT_DIR$/../Vision/texture_scorer.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/../Vision/vision_config.json" beforeDir="false" afterPath="$PROJECT_DIR$/../Vision/vision_config.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../Vision/vision_serial_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/../Vision/vision_serial_service.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -207,7 +197,7 @@
       <workItem from="1785331283477" duration="315000" />
       <workItem from="1785331614207" duration="313000" />
       <workItem from="1785331933963" duration="1150000" />
-      <workItem from="1785374075256" duration="29358000" />
+      <workItem from="1785374075256" duration="32049000" />
     </task>
     <task id="LOCAL-00001" summary="7.5start">
       <option name="closed" value="true" />

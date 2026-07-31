@@ -37,7 +37,6 @@ enum class ExecuteState : uint8_t {
     WaitJ1Place,
     WaitGimbal2Finish,
     ReturnJ1Home,
-    WaitJ1Home,
 };
 
 ExecuteState execute_state = ExecuteState::Idle;
@@ -46,7 +45,6 @@ uint8_t execute_piece_index = 0U;
 uint16_t last_completed_sequence = 0U;
 uint32_t execute_stage_started_tick = 0U;
 uint32_t vision_start_min_execute_tick = 0U;
-uint32_t execute_home_stable_since_tick = 0U;
 
 float wrapToTwoPi(float angle_rad) {
     angle_rad = std::fmod(angle_rad, kTwoPi);
@@ -171,12 +169,6 @@ float radToDegrees(float angle_rad) {
     return angle_rad * 180.0f / std::numbers::pi_v<float>;
 }
 
-bool j1AtTarget(float target_rad) {
-    if (!j1_motor.feedbackFresh(HAL_GetTick(), kFeedbackTimeoutMs)) return false;
-    const float measured_joint_angle = motorToJointAngle(j1_motor.angle);
-    return std::fabs(measured_joint_angle - target_rad) <= kExecuteJ1ToleranceRad;
-}
-
 void commandJ1JointAngle(float joint_angle_rad, uint32_t now_ms) {
     processCommand(
         ScaraJ1Command{SCARA_J1_COMMAND_SET_ANGLE, joint_angle_rad}, now_ms);
@@ -193,7 +185,6 @@ void finishSequence(void) {
     execute_piece_index = 0U;
     execute_stage_started_tick = 0U;
     vision_start_min_execute_tick = 0U;
-    execute_home_stable_since_tick = 0U;
     execute_state = ExecuteState::Idle;
 }
 
@@ -208,7 +199,6 @@ void startExecution(const ScaraVisionResult &result, uint32_t now_ms) {
         --execute_piece_index;
     }
     Gimbal2Link_ClearFlags();
-    execute_home_stable_since_tick = 0U;
     startExecuteStage(ExecuteState::MoveJ1ToPick, now_ms);
 }
 
@@ -316,7 +306,6 @@ void updateExecution(uint32_t now_ms) {
         if (!gimbal2_status.finish_flag) break;
         Gimbal2Link_ClearFlags();
         if ((execute_piece_index + 1U) >= execute_result.expected_piece_count) {
-            execute_home_stable_since_tick = 0U;
             startExecuteStage(ExecuteState::ReturnJ1Home, now_ms);
         } else {
             execute_result = ScaraVisionResult{};
@@ -332,20 +321,6 @@ void updateExecution(uint32_t now_ms) {
 
     case ExecuteState::ReturnJ1Home:
         commandJ1JointAngle(kStartupHomeJointAngleRad, now_ms);
-        execute_home_stable_since_tick = 0U;
-        startExecuteStage(ExecuteState::WaitJ1Home, now_ms);
-        break;
-
-    case ExecuteState::WaitJ1Home:
-        if (!j1AtTarget(kStartupHomeJointAngleRad)) {
-            execute_home_stable_since_tick = 0U;
-            break;
-        }
-        if (execute_home_stable_since_tick == 0U) {
-            execute_home_stable_since_tick = now_ms;
-            break;
-        }
-        if ((now_ms - execute_home_stable_since_tick) < kStartupHomeStableMs) break;
         if (!Gimbal2Link_SendWin()) {
             enterFault();
             return;

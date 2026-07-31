@@ -81,6 +81,19 @@ void parseLine(const char *line) {
     char *cmd = strtok_r(work, ",", &context);
     if (cmd == nullptr) return;
 
+    /*
+     * Gimbal2 当前发送的是 READY\n/OK\n；同时兼容 VOFA 调试端的
+     * READY=1!/OK=1! 写法，统一只取命令名进行状态机处理。
+     */
+    char *assignment = std::strchr(cmd, '=');
+    if (assignment != nullptr) {
+        *assignment = '\0';
+    }
+    char *terminator = std::strchr(cmd, '!');
+    if (terminator != nullptr) {
+        *terminator = '\0';
+    }
+
     if (equalsUpper(cmd, "READY")) {
         link_status.state = GIMBAL2_LINK_STATE_READY;
         link_status.ready_flag = true;
@@ -125,7 +138,8 @@ void parseLine(const char *line) {
 void feedByte(uint8_t byte) {
     if (byte == '\r') return;
 
-    if (byte == '\n') {
+    /* Gimbal2 以换行结束；兼容 VOFA FireWater 的 ! 结束符。 */
+    if (byte == '\n' || byte == '!') {
         frame_buf[frame_len] = '\0';
         if (frame_len > 0U) {
             parseLine(frame_buf);
