@@ -18,7 +18,7 @@ void StartMotorTask(void *argument)
 {
     /* ---- 初始化 CAN 滤波器并启动回零 ---- */
     USER_CAN1_Filter_Init();
-    Emm_V5_Origin_Trigger_Return(1, 0, false);
+    //Emm_V5_Origin_Trigger_Return(1, 0, false);
     Emm_V5_Origin_Trigger_Return(2, 0, false);
     osDelay(1000);
 
@@ -34,7 +34,7 @@ void StartMotorTask(void *argument)
         case ARM_IDLE:
             if (Arm_TakeCmd(CMD_TASK, ARM_MOVING_TO_START, &x, &y)) {
                 s_pick_x = x;
-                Rotate(1, x);
+                //Rotate(1, x);
                 Rotate(2, y);
             }
             break;
@@ -62,7 +62,7 @@ void StartMotorTask(void *argument)
         /* ---- 等上位机发第二段 TASK ---- */
         case ARM_WAIT_PLACE:
             if (Arm_TakeCmd(CMD_PLACE, ARM_MOVING_TO_PLACE, &x, &y)) {
-                Rotate(1, x);
+                //Rotate(1, x);
                 Rotate(2, y);
             }
             break;

@@ -118,14 +118,14 @@ static int test_key_equal(const char *a, const char *b)
 static int test_vofa_apply_kv(const char *key, float value) {
     if (test_key_equal(key, "ZERO")) {
 
-        Emm_V5_MMCL_En_Control(1, true, false);
+        //Emm_V5_MMCL_En_Control(1, true, false);
         Emm_V5_MMCL_En_Control(2, true, false);
-        Emm_V5_Multi_Motor_Cmd(0);   // 广播触发，两个电机同时开始
-        Emm_V5_Origin_Trigger_Return(1,0,false);
+        //Emm_V5_Multi_Motor_Cmd(0);   // 广播触发，两个电机同时开始
+        //Emm_V5_Origin_Trigger_Return(1,0,false);
         Emm_V5_Origin_Trigger_Return(2,0,false);
         // Emm_V5_Origin_Set_O(1, true);
         // Emm_V5_Origin_Set_O(2, true);
-        Emm_V5_Multi_Motor_Cmd(0);   // 广播触发，两个电机同时开始
+        //Emm_V5_Multi_Motor_Cmd(0);   // 广播触发，两个电机同时开始
         last_pos_pitch = 0;
         last_pos_yaw   = 0;
         printsf(0,"ZERO");
@@ -165,7 +165,7 @@ static int test_vofa_apply_kv(const char *key, float value) {
         return 1;
     }
     if (test_key_equal(key, "DISABLE")) {
-        Emm_V5_MMCL_En_Control(1, false, false);
+        //Emm_V5_MMCL_En_Control(1, false, false);
         Emm_V5_MMCL_En_Control(2, false, false);
         Emm_V5_Multi_Motor_Cmd(0);   // 广播触发，两个电机同时开始
         printsf(0,"DISABLE");

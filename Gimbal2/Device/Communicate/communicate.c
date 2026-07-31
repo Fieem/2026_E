@@ -95,7 +95,7 @@ static void comm_pi_parse_line(const char *line)
     }
     else if (strcmp_upper(cmd, "WIN") == 0) {
         comm_win_flag = true;
-        Emm_V5_Origin_Trigger_Return(1,0,false);
+        //Emm_V5_Origin_Trigger_Return(1,0,false);
         Emm_V5_Origin_Trigger_Return(2,0,false);
         printsf(0, "WIN");
     }
