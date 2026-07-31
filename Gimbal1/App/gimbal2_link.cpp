@@ -87,6 +87,12 @@ void parseLine(const char *line) {
         return;
     }
 
+    if (equalsUpper(cmd, "OK")) {
+        link_status.state = GIMBAL2_LINK_STATE_POKER;
+        link_status.ok_flag = true;
+        return;
+    }
+
     if (equalsUpper(cmd, "PICK")) {
         link_status.state = GIMBAL2_LINK_STATE_PICK;
         link_status.pick_flag = true;
@@ -176,6 +182,7 @@ extern "C" bool Gimbal2Link_GetStatus(Gimbal2LinkStatus *status) {
 extern "C" bool Gimbal2Link_ClearFlags(void) {
     link_status.new_flag = false;
     link_status.ready_flag = false;
+    link_status.ok_flag = false;
     link_status.pick_flag = false;
     link_status.finish_flag = false;
     link_status.busy_flag = false;
@@ -214,4 +221,12 @@ extern "C" bool Gimbal2Link_SendLine(const char *line) {
                reinterpret_cast<uint8_t *>(const_cast<char *>(line)),
                static_cast<uint16_t>(length),
                100U) == HAL_OK;
+}
+
+extern "C" bool Gimbal2Link_SendStart(void) {
+    return Gimbal2Link_SendLine("START\n");
+}
+
+extern "C" bool Gimbal2Link_SendWin(void) {
+    return Gimbal2Link_SendLine("WIN\n");
 }

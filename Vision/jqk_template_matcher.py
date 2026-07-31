@@ -12,11 +12,22 @@ import cv2
 import numpy as np
 
 
-EXPECTED_TEMPLATE_NAMES: Tuple[str, ...] = tuple(
-    f"{suit}_{rank}"
-    for suit in ("spade", "heart", "club", "diamond")
-    for rank in ("J", "Q", "K")
-)
+VALID_SUITS: Tuple[str, ...] = ("spade", "heart", "club", "diamond")
+RANK_SORT_ORDER: Dict[str, int] = {
+    "A": 1,
+    "2": 2,
+    "3": 3,
+    "4": 4,
+    "5": 5,
+    "6": 6,
+    "7": 7,
+    "8": 8,
+    "9": 9,
+    "10": 10,
+    "J": 11,
+    "Q": 12,
+    "K": 13,
+}
 SUPPORTED_TEMPLATE_SUFFIXES: Tuple[str, ...] = (".jpg", ".jpeg", ".png")
 
 
@@ -42,7 +53,46 @@ class CardFeature:
 
 
 def expected_template_files() -> List[str]:
-    return [f"{name}.jpg" for name in EXPECTED_TEMPLATE_NAMES]
+    return [
+        f"{suit}_{rank}.jpg"
+        for suit in VALID_SUITS
+        for rank in ("A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K")
+    ]
+
+
+def _parse_template_stem(stem: str) -> Tuple[str, str] | None:
+    if "_" not in stem:
+        return None
+    suit, rank = stem.split("_", 1)
+    suit = suit.strip().lower()
+    rank = rank.strip().upper()
+    if suit not in VALID_SUITS:
+        return None
+    if rank not in RANK_SORT_ORDER:
+        return None
+    return suit, rank
+
+
+def _discover_template_names(template_dir: Path) -> List[str]:
+    names = set()
+    for path in template_dir.iterdir():
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in SUPPORTED_TEMPLATE_SUFFIXES:
+            continue
+        parsed = _parse_template_stem(path.stem)
+        if parsed is None:
+            continue
+        suit, rank = parsed
+        names.add(f"{suit}_{rank}")
+    return sorted(
+        names,
+        key=lambda name: (
+            VALID_SUITS.index(name.split("_", 1)[0]),
+            RANK_SORT_ORDER.get(name.split("_", 1)[1], 999),
+            name,
+        ),
+    )
 
 
 def _find_template_path(template_dir: Path, template_name: str) -> Path | None:
@@ -183,7 +233,7 @@ def _load_template_bank_cached(
 ) -> Tuple[TemplateFeature, ...]:
     template_dir = Path(template_dir_text)
     features: List[TemplateFeature] = []
-    for template_name in EXPECTED_TEMPLATE_NAMES:
+    for template_name in _discover_template_names(template_dir):
         path = _find_template_path(template_dir, template_name)
         if path is None:
             continue
@@ -220,15 +270,9 @@ def load_template_bank(
             int(canvas_height_px),
         )
     )
-    available_names = {template.name for template in templates}
-    missing_names = [
-        f"{template_name}.jpg"
-        for template_name in EXPECTED_TEMPLATE_NAMES
-        if template_name not in available_names
-    ]
     return {
         "templates": templates,
-        "missing_templates": missing_names,
+        "missing_templates": [],
         "loaded_template_count": len(templates),
     }
 
@@ -543,7 +587,6 @@ def match_card_to_templates(
             "error": "no_templates_loaded",
             "loaded_template_count": 0,
             "missing_templates": template_bank["missing_templates"],
-            "candidate_scores": [],
         }
 
     card = _extract_card_feature(
@@ -709,10 +752,7 @@ def match_card_to_templates(
             "error": "template_match_failed",
             "loaded_template_count": len(templates),
             "missing_templates": template_bank["missing_templates"],
-            "candidate_scores": [],
         }
-
-    top_scores = all_scores[: min(6, len(all_scores))]
     return {
         "best_name": best_payload["template_name"],
         "best_score": float(best_payload["score"]),
@@ -735,7 +775,6 @@ def match_card_to_templates(
         "suit_edge_score": float(best_payload["suit_edge_score"]),
         "red_score": float(best_payload["red_score"]),
         "black_score": float(best_payload["black_score"]),
-        "candidate_scores": top_scores,
         "loaded_template_count": len(templates),
         "missing_templates": template_bank["missing_templates"],
         "card_preview": best_oriented_card.image,

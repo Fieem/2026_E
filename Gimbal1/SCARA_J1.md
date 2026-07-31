@@ -56,6 +56,9 @@ Gimbal1 通过 USART1 向树莓派发送识别开始帧，并接收树莓派返�
 | `0x0201` | Gimbal1 → 树莓派 | START，flags 中为任务序号 |
 | `0x0202` | 树莓派 → Gimbal1 | 每块碎片 6 个 float32 |
 | `0x0203` | 树莓派 → Gimbal1 | 错误码 1 个 float32 |
+| `0x0204` | Gimbal1 → 树莓派 | 请求下一块碎片 |
+| `0x0205` | Gimbal1 → 树莓派 | 基础模式启动 |
+| `0x0206` | Gimbal1 → 树莓派 | 扑克模式启动 |
 
 `VISION_RESULT` 的 6 个浮点数依次为：
 
@@ -70,12 +73,14 @@ Gimbal1 通过 USART1 向树莓派发送识别开始帧，并接收树莓派返�
 上层动作任务在确认机械臂位于安全观测位置后调用：
 
 ```cpp
-Vision_RequestStart();
+Vision_RequestStart(SCARA_VISION_MODE_BASIC);
 ```
 
-该函数必须从 FreeRTOS 任务上下文调用，不能在中断回调中调用。视觉结果可通过
-`Vision_GetResult()` 读取；当前工程只完成缓存和校验，J2 转发到 Gimbal2、
-舵机和电磁铁动作留待下一阶段。
+该函数必须从 FreeRTOS 任务上下文调用，不能在中断回调中调用。Gimbal2 通过
+USART10 发送 `READY\n` 时选择基础模式，发送 `OK\n` 时选择扑克模式；Gimbal1
+向树莓派发送对应启动帧成功后再回复 Gimbal2 `START\n`。完整任务执行结束后，
+Gimbal1 将 J1 回到 `kStartupHomeJointAngleRad` 并确认到位，再发送 `WIN\n`。
+视觉结果可通过 `Vision_GetResult()` 读取。
 
 ## 编译与烧录
 

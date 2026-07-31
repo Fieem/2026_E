@@ -80,7 +80,7 @@ void setError(ScaraVisionError error) {
 
 } // namespace
 
-extern "C" bool Vision_RequestStart(void) {
+extern "C" bool Vision_RequestStart(const ScaraVisionMode mode) {
     if (vision_state == SCARA_VISION_STATE_WAITING) return false;
 
     uint16_t sequence = static_cast<uint16_t>((next_sequence + 1U) & kSequenceMask);
@@ -94,7 +94,10 @@ extern "C" bool Vision_RequestStart(void) {
     vision_result.sequence = sequence;
     vision_started_tick = HAL_GetTick();
 
-    if (!sendVisionCommand(SCARA_CMD_VISION_START, sequence)) {
+    const uint16_t command = mode == SCARA_VISION_MODE_POKER
+                                 ? SCARA_CMD_VISION_START_POKER
+                                 : SCARA_CMD_VISION_START_BASIC;
+    if (!sendVisionCommand(command, sequence)) {
         setError(SCARA_VISION_ERROR_UART);
         return false;
     }

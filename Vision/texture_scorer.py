@@ -395,6 +395,216 @@ def _select_diverse_geometry_candidates(
     return selected
 
 
+def _edge_lengths_from_points(points: Sequence[Pt]) -> List[float]:
+    return [
+        points[index].dist(points[(index + 1) % len(points)])
+        for index in range(len(points))
+    ]
+
+
+def _is_near_equilateral_triangle(
+    points: Sequence[Pt],
+    tolerance_mm: float,
+    relative_tolerance: float,
+) -> bool:
+    if len(points) != 3:
+        return False
+    edge_lengths = _edge_lengths_from_points(points)
+    if not edge_lengths:
+        return False
+    min_length = min(edge_lengths)
+    max_length = max(edge_lengths)
+    if min_length <= EPS:
+        return False
+    allowed_error = max(float(tolerance_mm), float(relative_tolerance) * max_length)
+    return (max_length - min_length) <= allowed_error
+
+
+def _line_distance(point: Pt, start: Pt, end: Pt) -> float:
+    direction = end.sub(start)
+    length = direction.length()
+    if length <= EPS:
+        return point.dist(start)
+    return abs(direction.cross(point.sub(start))) / length
+
+
+def _edge_contact_metrics(
+    first_start: Pt,
+    first_end: Pt,
+    second_start: Pt,
+    second_end: Pt,
+    *,
+    angle_tolerance_rad: float,
+    distance_tolerance_mm: float,
+) -> Optional[Tuple[float, float]]:
+    first_direction = first_end.sub(first_start)
+    second_direction = second_end.sub(second_start)
+    first_length = first_direction.length()
+    second_length = second_direction.length()
+    if first_length <= EPS or second_length <= EPS:
+        return None
+
+    first_angle = math.atan2(first_direction.y, first_direction.x)
+    second_angle = math.atan2(second_direction.y, second_direction.x)
+    angle_diff = abs(_angle_wrap(first_angle - second_angle))
+    angle_diff = min(angle_diff, abs(math.pi - angle_diff))
+    if angle_diff > angle_tolerance_rad:
+        return None
+
+    gap = min(
+        0.5
+        * (
+            _line_distance(second_start, first_start, first_end)
+            + _line_distance(second_end, first_start, first_end)
+        ),
+        0.5
+        * (
+            _line_distance(first_start, second_start, second_end)
+            + _line_distance(first_end, second_start, second_end)
+        ),
+    )
+    if gap > distance_tolerance_mm:
+        return None
+
+    axis = first_direction.scale(1.0 / first_length)
+    second_interval = sorted(
+        (
+            second_start.sub(first_start).dot(axis),
+            second_end.sub(first_start).dot(axis),
+        )
+    )
+    overlap = max(
+        0.0,
+        min(first_length, second_interval[1]) - max(0.0, second_interval[0]),
+    )
+    if overlap <= EPS:
+        return None
+    return overlap, gap
+
+
+def _find_piece_contact_pairs(
+    world_polygons: Dict[int, List[Pt]],
+    moving_index: int,
+    *,
+    angle_tolerance_rad: float = 0.35,
+    distance_tolerance_mm: float = 2.5,
+    minimum_overlap_mm: float = 5.0,
+    max_pairs: int = 4,
+) -> List[Dict]:
+    moving_polygon = world_polygons.get(moving_index)
+    if not moving_polygon:
+        return []
+
+    pairs: List[Dict] = []
+    for moving_edge_index in range(len(moving_polygon)):
+        moving_start, moving_end = _edge(moving_polygon, moving_edge_index)
+        for fixed_index, fixed_polygon in world_polygons.items():
+            if fixed_index == moving_index:
+                continue
+            for fixed_edge_index in range(len(fixed_polygon)):
+                fixed_start, fixed_end = _edge(fixed_polygon, fixed_edge_index)
+                metrics = _edge_contact_metrics(
+                    fixed_start,
+                    fixed_end,
+                    moving_start,
+                    moving_end,
+                    angle_tolerance_rad=angle_tolerance_rad,
+                    distance_tolerance_mm=distance_tolerance_mm,
+                )
+                if metrics is None:
+                    continue
+                overlap, gap = metrics
+                if overlap + EPS < minimum_overlap_mm:
+                    continue
+                pairs.append(
+                    {
+                        "moving_edge_index": moving_edge_index,
+                        "fixed_index": fixed_index,
+                        "fixed_edge_index": fixed_edge_index,
+                        "overlap": overlap,
+                        "gap": gap,
+                    }
+                )
+    pairs.sort(key=lambda item: (-float(item["overlap"]), float(item["gap"])))
+    unique_pairs: List[Dict] = []
+    seen = set()
+    for pair in pairs:
+        key = (
+            int(pair["moving_edge_index"]),
+            int(pair["fixed_index"]),
+            int(pair["fixed_edge_index"]),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_pairs.append(pair)
+        if len(unique_pairs) >= max_pairs:
+            break
+    return unique_pairs
+
+
+def _edge_alignment_translations_for_fixed_angle(
+    fixed_start: Pt,
+    fixed_end: Pt,
+    moving_start: Pt,
+    moving_end: Pt,
+    minimum_contact: float,
+    reverse_direction: bool = True,
+) -> List[Tuple[Pt, float, float]]:
+    fixed_direction = fixed_end.sub(fixed_start)
+    moving_direction = moving_end.sub(moving_start)
+    fixed_length = fixed_direction.length()
+    moving_length = moving_direction.length()
+    if fixed_length <= EPS or moving_length <= EPS:
+        return []
+
+    fixed_midpoint = fixed_start.lerp(fixed_end, 0.5)
+    moving_midpoint = moving_start.lerp(moving_end, 0.5)
+    if reverse_direction:
+        centers = [
+            fixed_end.sub(moving_start),
+            fixed_start.sub(moving_end),
+            fixed_start.sub(moving_start),
+            fixed_end.sub(moving_end),
+            fixed_midpoint.sub(moving_midpoint),
+        ]
+    else:
+        centers = [
+            fixed_start.sub(moving_start),
+            fixed_end.sub(moving_end),
+            fixed_start.sub(moving_end),
+            fixed_end.sub(moving_start),
+            fixed_midpoint.sub(moving_midpoint),
+        ]
+
+    axis = fixed_direction.scale(1.0 / fixed_length)
+    results: List[Tuple[Pt, float, float]] = []
+    seen = set()
+    for center in centers:
+        key = (round(center.x, 6), round(center.y, 6))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        aligned_start = moving_start.add(center)
+        aligned_end = moving_end.add(center)
+        moving_interval = sorted(
+            (
+                aligned_start.sub(fixed_start).dot(axis),
+                aligned_end.sub(fixed_start).dot(axis),
+            )
+        )
+        overlap = max(
+            0.0,
+            min(fixed_length, moving_interval[1]) - max(0.0, moving_interval[0]),
+        )
+        if overlap + EPS < minimum_contact:
+            continue
+        contact_ratio = overlap / min(fixed_length, moving_length)
+        results.append((center, contact_ratio, overlap))
+    return results
+
+
 def polygon_orientation(points: Sequence[Pt]) -> float:
     """用最小面积外接矩形的主边估计碎片方向，结果单位为弧度。"""
 
@@ -656,6 +866,7 @@ def find_rectangle_solution(
     triangle_flip_requires_similar_edge: bool = True,
     triangle_flip_max_alignments_per_edge_pair: int = 2,
     triangle_flip_candidate_quota: int = 0,
+    triangle_flip_overlap_tolerance_extra_mm: float = 0.0,
     triangle_flip_partial_diagonal_extra_mm: float = 0.0,
     triangle_flip_partial_area_scale: float = 1.0,
     triangle_flip_priority_bonus: float = 0.0,
@@ -1020,11 +1231,17 @@ def find_rectangle_solution(
                                 candidate_polygon = transform_polygon(
                                     moving_points, angle, center
                                 )
+                                candidate_overlap_tolerance = (
+                                    overlap_tolerance_mm
+                                    + max(0.0, float(triangle_flip_overlap_tolerance_extra_mm))
+                                    if flip_generated
+                                    else overlap_tolerance_mm
+                                )
                                 if any(
                                     polygons_overlap(
                                         candidate_polygon,
                                         placed_polygon,
-                                        overlap_tolerance_mm,
+                                        candidate_overlap_tolerance,
                                     )
                                     for placed_polygon in placed_polygons
                                 ):
@@ -1837,23 +2054,46 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
                        fallback_full_rect_penalty=0.12,
                        fallback_sparse_seam_penalty=0.08,
                        geometry_candidate_min_angle_diff_rad=0.0,
+                       base_geometry_candidate_limit=0,
+                       candidate_rerank_enabled=True,
+                       perturb_candidate_enabled=True,
+                       equilateral_triangle_rotation_enabled=False,
+                       equilateral_triangle_tolerance_mm=0.0,
+                       equilateral_triangle_relative_tolerance=0.0,
+                       equilateral_triangle_rotation_angles_deg=None,
+                       equilateral_triangle_shape_penalty=0.0,
                        angle_perturb_rad=0.035,
                        translate_perturb_mm=1.2):
-    """Geometry + texture joint solver with top-K re-ranking.
+    """Geometry candidate solver with optional texture re-ranking.
 
     1. Run geometric solver to find candidate pose(s)
     2. Generate perturbed variants for mirror/symmetry resolution
-    3. Score each with texture continuity
-    4. Re-rank by J_total = J_shape + lambda * J_texture
+    3. Optionally score each with texture continuity
+    4. Optionally re-rank by J_total = J_shape + lambda * J_texture
 
     Returns dict with best_solution, texture scores, and candidates list.
     """
     if geometry_kwargs is None:
         geometry_kwargs = {}
+    total_piece_area = sum(abs(polygon_area(piece["pts"])) for piece in pieces_geometry)
 
     def _ensure_Pt(p):
         if isinstance(p, Pt): return p
         return Pt(p[0], p[1])
+
+    def _pose_signature(solution):
+        poses = solution.get("poses", {})
+        return tuple(
+            sorted(
+                (
+                    int(index),
+                    round(float(angle), 6),
+                    round(float(center.x), 4),
+                    round(float(center.y), 4),
+                )
+                for index, (angle, center) in poses.items()
+            )
+        )
 
     # Step 1: Find geometric solution(s)
     sol = find_rectangle_solution(
@@ -1875,16 +2115,291 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
             if bool(candidate.get("uses_triangle_flip", False))
             else "geometry"
         )
+    if int(base_geometry_candidate_limit) > 0:
+        geometry_candidates = [
+            candidate
+            for candidate in candidates
+            if str(candidate.get("candidate_source", "")).startswith("geometry")
+        ]
+        other_candidates = [
+            candidate
+            for candidate in candidates
+            if not str(candidate.get("candidate_source", "")).startswith("geometry")
+        ]
+        candidates = geometry_candidates[: int(base_geometry_candidate_limit)] + other_candidates
 
-    # Step 2: Generate perturbed alternatives to fill the remaining slots
+    local_pts = {}
+    equilateral_triangle_indices = []
+    for pi, p in enumerate(pieces_geometry):
+        pts = p.get("pts", [])
+        ct = polygon_centroid(pts)
+        local_pts[pi] = [pt.sub(ct) for pt in pts]
+        if equilateral_triangle_rotation_enabled and _is_near_equilateral_triangle(
+            pts,
+            equilateral_triangle_tolerance_mm,
+            equilateral_triangle_relative_tolerance,
+        ):
+            equilateral_triangle_indices.append(pi)
+
+    candidate_signatures = {_pose_signature(candidate) for candidate in candidates}
+
+    def _build_rotated_triangle_candidate(
+        current_candidate: Dict,
+        triangle_index: int,
+        angle_deg: float,
+    ) -> Optional[Dict]:
+        current_poses = current_candidate.get("poses", {})
+        current_world = current_candidate.get("world_polygons", {})
+        current_placements = current_candidate.get("placements", [])
+        if (
+            triangle_index not in current_poses
+            or not current_world
+            or not current_placements
+        ):
+            return None
+
+        current_angle, current_center = current_poses[triangle_index]
+        triangle_local_points = local_pts.get(triangle_index)
+        if not triangle_local_points:
+            return None
+
+        contact_pairs = _find_piece_contact_pairs(
+            current_world,
+            triangle_index,
+            angle_tolerance_rad=0.40,
+            distance_tolerance_mm=max(
+                2.5,
+                float(geometry_kwargs.get("edge_tolerance_mm", 3.0)),
+            ),
+            minimum_overlap_mm=max(
+                5.0,
+                0.25 * min(_edge_lengths_from_points(triangle_local_points)),
+            ),
+            max_pairs=3,
+        )
+        if not contact_pairs:
+            return None
+
+        desired_angle = _angle_wrap(current_angle + math.radians(angle_deg))
+        best_alt = None
+        best_alt_score = float("inf")
+
+        for pair in contact_pairs:
+            fixed_polygon = current_world.get(int(pair["fixed_index"]))
+            if not fixed_polygon:
+                continue
+            fixed_start, fixed_end = _edge(
+                fixed_polygon,
+                int(pair["fixed_edge_index"]),
+            )
+            for moving_edge_index in range(len(triangle_local_points)):
+                moving_start = triangle_local_points[moving_edge_index].rotate(
+                    desired_angle
+                )
+                moving_end = triangle_local_points[
+                    (moving_edge_index + 1) % len(triangle_local_points)
+                ].rotate(desired_angle)
+                minimum_contact = max(
+                    5.0,
+                    0.55
+                    * min(
+                        fixed_start.dist(fixed_end),
+                        moving_start.dist(moving_end),
+                    ),
+                )
+                centers = _edge_alignment_translations_for_fixed_angle(
+                    fixed_start,
+                    fixed_end,
+                    moving_start,
+                    moving_end,
+                    minimum_contact,
+                    True,
+                )
+                if not centers:
+                    continue
+                for center, _contact_ratio, _contact_length in centers:
+                    rotated_world = {
+                        idx: [Pt(point.x, point.y) for point in polygon]
+                        for idx, polygon in current_world.items()
+                    }
+                    rotated_triangle = transform_polygon(
+                        triangle_local_points,
+                        desired_angle,
+                        _ensure_Pt(center),
+                    )
+                    if any(
+                        polygons_overlap(
+                            rotated_triangle,
+                            polygon,
+                            float(geometry_kwargs.get("overlap_tolerance_mm", 1.5)),
+                        )
+                        for idx, polygon in current_world.items()
+                        if idx != triangle_index
+                    ):
+                        continue
+                    rotated_world[triangle_index] = rotated_triangle
+                    support_pairs = _find_piece_contact_pairs(
+                        rotated_world,
+                        triangle_index,
+                        angle_tolerance_rad=0.28,
+                        distance_tolerance_mm=min(
+                            1.8,
+                            float(geometry_kwargs.get("edge_tolerance_mm", 3.0)),
+                        ),
+                        minimum_overlap_mm=4.0,
+                        max_pairs=4,
+                    )
+                    contact_count = len(support_pairs)
+                    contact_overlap = sum(
+                        float(item.get("overlap", 0.0))
+                        for item in support_pairs[:2]
+                    )
+                    avg_gap = (
+                        sum(float(item.get("gap", 0.0)) for item in support_pairs[:2])
+                        / max(1, min(2, contact_count))
+                    )
+                    rectangle = minimum_area_rectangle(
+                        [
+                            point
+                            for polygon in rotated_world.values()
+                            for point in polygon
+                        ]
+                    )
+                    if rectangle is None or rectangle["area"] <= EPS:
+                        continue
+                    area_error = abs(rectangle["area"] - total_piece_area) / rectangle["area"]
+                    local_score = (
+                        area_error
+                        + 0.22 * max(0, 2 - min(2, contact_count))
+                        + 0.04 * avg_gap
+                        + 0.0015 * _ensure_Pt(center).dist(_ensure_Pt(current_center))
+                        - 0.002 * min(contact_overlap, 25.0)
+                    )
+                    if local_score >= best_alt_score:
+                        continue
+
+                    rotated_poses = dict(current_poses)
+                    rotated_poses[triangle_index] = (
+                        desired_angle,
+                        _ensure_Pt(center),
+                    )
+                    alt = dict(current_candidate)
+                    alt["poses"] = rotated_poses
+                    alt["world_polygons"] = rotated_world
+                    alt["score"] = (
+                        float(current_candidate.get("score", 0.0))
+                        + float(equilateral_triangle_shape_penalty)
+                        + float(local_score)
+                    )
+                    rotation_steps = list(
+                        current_candidate.get("triangle_rotation_steps", [])
+                    )
+                    rotation_steps.append(
+                        {
+                            "piece_index": int(triangle_index),
+                            "angle_deg": int(round(angle_deg)),
+                        }
+                    )
+                    alt["triangle_rotation_steps"] = rotation_steps
+                    alt["candidate_source"] = "triangle_rot_" + "_".join(
+                        f"p{int(step['piece_index'])}_{int(step['angle_deg'])}"
+                        for step in rotation_steps
+                    )
+                    alt_placements = copy.deepcopy(current_placements)
+                    for pl in alt_placements:
+                        pi = int(pl.get("piece_index", 0))
+                        if pi != triangle_index:
+                            continue
+                        a, c = rotated_poses[pi]
+                        pl["target_center"] = _ensure_Pt(c)
+                        pl["angle"] = _angle_wrap(a)
+                        source_orientation = float(pl.get("source_orientation", 0.0))
+                        pl["target_orientation"] = _angle_wrap(source_orientation + a)
+                        pl["target_pts"] = rotated_world[pi]
+                        if "source_center" in pl:
+                            pl["offset"] = pl["target_center"].sub(pl["source_center"])
+                    alt["placements"] = alt_placements
+                    best_alt = alt
+                    best_alt_score = local_score
+        return best_alt
+
+    # Step 2: For near-equilateral triangles, additionally test 60° / 120°
+    # rotations on top of the geometric candidate and let template/texture
+    # decide whether the pattern becomes more consistent.
+    if (
+        equilateral_triangle_rotation_enabled
+        and equilateral_triangle_indices
+        and equilateral_triangle_rotation_angles_deg
+    ):
+        base_rotation_candidates = list(candidates)
+        rotation_angles_deg = [
+            float(angle_deg)
+            for angle_deg in equilateral_triangle_rotation_angles_deg
+            if abs(float(angle_deg)) > 1e-6
+        ]
+        for base_candidate in base_rotation_candidates:
+            base_poses = base_candidate.get("poses", {})
+            if not base_poses:
+                continue
+            active_triangle_indices = [
+                triangle_index
+                for triangle_index in equilateral_triangle_indices
+                if triangle_index in base_poses
+            ]
+            if not active_triangle_indices:
+                continue
+
+            def _enumerate_triangle_rotation_combinations(
+                triangle_pos: int,
+                current_candidate: Dict,
+                changed: bool,
+            ) -> None:
+                if triangle_pos >= len(active_triangle_indices):
+                    if not changed:
+                        return
+                    signature = _pose_signature(current_candidate)
+                    if signature in candidate_signatures:
+                        return
+                    candidate_signatures.add(signature)
+                    candidates.append(current_candidate)
+                    return
+
+                triangle_index = active_triangle_indices[triangle_pos]
+
+                # 当前三角形不旋转，直接进入下一个。
+                _enumerate_triangle_rotation_combinations(
+                    triangle_pos + 1,
+                    current_candidate,
+                    changed,
+                )
+
+                # 当前三角形分别尝试 60° / 120° 等候选；如果有两个等边三角形，
+                # 递归会自然把它们的组合情况全部枚举出来。
+                for angle_deg in rotation_angles_deg:
+                    rotated_candidate = _build_rotated_triangle_candidate(
+                        current_candidate,
+                        triangle_index,
+                        angle_deg,
+                    )
+                    if rotated_candidate is None:
+                        continue
+                    _enumerate_triangle_rotation_combinations(
+                        triangle_pos + 1,
+                        rotated_candidate,
+                        True,
+                    )
+
+            _enumerate_triangle_rotation_combinations(0, base_candidate, False)
+
+    # Step 3: Generate perturbed alternatives to fill the remaining slots
     base_solution = candidates[0]
-    if top_k > len(candidates) and 'poses' in base_solution and 'world_polygons' in base_solution:
+    if (
+        perturb_candidate_enabled
+        and top_k > len(candidates)
+        and 'poses' in base_solution
+        and 'world_polygons' in base_solution
+    ):
         base_poses = base_solution['poses']
-        # Build local_points for each piece
-        local_pts = {}
-        for pi, p in enumerate(pieces_geometry):
-            ct = polygon_centroid(p['pts'])
-            local_pts[pi] = [pt.sub(ct) for pt in p['pts']]
         perturb_patterns = [
             (0.0, 0.0, 0.0),
             (+angle_perturb_rad, 0.0, 0.0),
@@ -1934,31 +2449,41 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
             alt['placements'] = alt_placements
             candidates.append(alt)
 
-    # Step 3: Texture score each candidate
-    scorer = TextureScorer(
-        mm_per_px=mm_per_px,
-        strip_width_mm=strip_width_mm,
-        lambda_texture=lambda_texture,
-        gw=gw,
-        nw=nw,
-        ow=ow,
-        pw=pw,
-        fallback_full_rect_penalty=fallback_full_rect_penalty,
-        fallback_sparse_seam_penalty=fallback_sparse_seam_penalty,
-    )
+    # Step 4: Optionally texture-score and re-rank each candidate.
     results = []
-    for i, cs in enumerate(candidates):
-        tex = scorer.score_solution(cs, pieces_texture)
-        j_shape = cs.get("score", 0.0)
-        j_total = scorer.total_score(j_shape, tex)
-        results.append({
-            "geometry": cs, "texture": tex,
-            "j_shape": j_shape,
-            "j_texture": 1.0 - tex["texture_score"],
-            'j_total': j_total,
-        })
-
-    results.sort(key=lambda c: c['j_total'])
+    if candidate_rerank_enabled:
+        scorer = TextureScorer(
+            mm_per_px=mm_per_px,
+            strip_width_mm=strip_width_mm,
+            lambda_texture=lambda_texture,
+            gw=gw,
+            nw=nw,
+            ow=ow,
+            pw=pw,
+            fallback_full_rect_penalty=fallback_full_rect_penalty,
+            fallback_sparse_seam_penalty=fallback_sparse_seam_penalty,
+        )
+        for cs in candidates:
+            tex = scorer.score_solution(cs, pieces_texture)
+            j_shape = cs.get("score", 0.0)
+            j_total = scorer.total_score(j_shape, tex)
+            results.append({
+                "geometry": cs,
+                "texture": tex,
+                "j_shape": j_shape,
+                "j_texture": 1.0 - tex["texture_score"],
+                "j_total": j_total,
+            })
+        results.sort(key=lambda c: c["j_total"])
+    else:
+        for cs in candidates:
+            results.append({
+                "geometry": cs,
+                "texture": {},
+                "j_shape": float(cs.get("score", 0.0)),
+                "j_texture": 0.0,
+                "j_total": float(cs.get("score", 0.0)),
+            })
     best = results[0]
     return {
         "best_solution": best["geometry"],

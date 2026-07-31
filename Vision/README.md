@@ -130,8 +130,9 @@ python visual_demo.py --seed 29 --noise 1.0 --output rectangle_demo.png
 
 ## 树莓派—Gimbal1 串口服务
 
-`vision_serial_service.py` 等待 Gimbal1 通过 USART1 发送 `VISION_START`，
-收到后只采集并处理一帧图像。识别成功后，每块碎片发送一个结果帧，结果包含：
+`vision_serial_service.py` 等待 Gimbal1 通过 USART1 发送视觉启动帧，收到后只采集
+并处理一帧图像。`0x0205` 选择基础模式，`0x0206` 选择扑克牌模式，旧的 `0x0201`
+仍按配置文件中的 `piece_mode` 运行。识别成功后，每块碎片发送一个结果帧，结果包含：
 
 ```text
 pick_j1_rad, place_j1_rad,

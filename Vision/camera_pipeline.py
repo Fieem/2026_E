@@ -116,7 +116,7 @@ def texture_pipeline_enabled(config: Dict) -> bool:
 
 
 def jqk_template_enabled(config: Dict) -> bool:
-    """仅在扑克牌模式下启用 J/Q/K 模板重排。"""
+    """仅在扑克牌模式下启用扑克牌模板重排。"""
 
     if get_piece_mode(config) != "playing_cards":
         return False
@@ -1380,18 +1380,19 @@ def create_candidate_gallery(
 
     for item in valid_items:
         candidate_index = int(item.get("candidate_index", 0))
-        score = float(item.get("score", 0.0))
         template_name = str(item.get("template_name", ""))
         source = str(item.get("candidate_source", ""))
         if source == "geometry_flip":
             source_tag = "F"
         elif source == "geometry":
             source_tag = "G"
+        elif source.startswith("triangle_rot_"):
+            source_tag = "R"
         elif source == "perturb":
             source_tag = "P"
         else:
             source_tag = source[:1].upper() if source else "?"
-        title = f"C{candidate_index}{source_tag} {score:.3f} {template_name}"
+        title = f"C{candidate_index}{source_tag} {template_name}".strip()
         panels.append(create_result_panel(item["image"], title, cell_size))
 
     while len(panels) % columns != 0:
@@ -1412,6 +1413,55 @@ def create_candidate_gallery(
         for row_image in row_images[1:]:
             gallery = np.vstack((gallery, separator_h.copy(), row_image))
     return gallery
+
+
+def build_raw_candidate_previews(
+    corrected: np.ndarray,
+    pieces: Sequence[DetectedPiece],
+    pixels_per_mm: float,
+    config: Dict,
+    solve_result: Dict,
+    max_items: int = 6,
+) -> List[Dict]:
+    """直接显示原始 G / R 候选，避免模板层去重后看不到。"""
+
+    jqk_template = config.get("jqk_template", {})
+    candidates = list(solve_result.get("candidates", []))
+    previews: List[Dict] = []
+    for candidate_index, candidate in enumerate(candidates):
+        solution = candidate.get("geometry")
+        if not isinstance(solution, dict):
+            continue
+        source = str(
+            candidate.get(
+                "candidate_source",
+                solution.get("candidate_source", ""),
+            )
+        )
+        if source != "geometry" and not source.startswith("triangle_rot_"):
+            continue
+        card_preview = render_solution_card_preview(
+            corrected,
+            pieces,
+            solution,
+            pixels_per_mm,
+            config,
+            int(jqk_template.get("canvas_width_px", 256)),
+            int(jqk_template.get("canvas_height_px", 384)),
+        )
+        if card_preview is None:
+            continue
+        previews.append(
+            {
+                "candidate_index": candidate_index,
+                "template_name": "",
+                "candidate_source": source,
+                "image": card_preview,
+            }
+        )
+        if len(previews) >= max(1, int(max_items)):
+            break
+    return previews
 
 
 def create_result_image(
@@ -1537,7 +1587,7 @@ def rerank_solution_with_jqk_templates(
     solve_result: Dict,
     diagnostics: Dict,
 ) -> Optional[Tuple[Dict, Dict, Dict]]:
-    """使用 J/Q/K 模板对候选拼法做二次排序。"""
+    """使用扑克牌模板对候选拼法做二次排序。"""
 
     if not jqk_template_enabled(config):
         diagnostics["template_enabled"] = False
@@ -1610,8 +1660,6 @@ def rerank_solution_with_jqk_templates(
             black_weight=float(jqk_template.get("black_weight", 0.15)),
         )
         match["candidate_index"] = candidate_index
-        match["geometry_score"] = float(candidate.get("j_shape", solution.get("score", 0.0)))
-        match["texture_rank_score"] = float(candidate.get("j_total", solution.get("score", 0.0)))
         texture_info = candidate.get("texture", {}) if isinstance(candidate.get("texture"), dict) else {}
         match["texture_fallback_full_rect"] = bool(
             texture_info.get("fallback_full_rect", False)
@@ -1683,39 +1731,9 @@ def rerank_solution_with_jqk_templates(
         "template_best_orientation_deg": int(best_match.get("best_orientation_deg", 0)),
         "loaded_template_count": int(best_match.get("loaded_template_count", 0)),
         "missing_templates": list(best_match.get("missing_templates", [])),
-        "template_candidate_scores": [
-            {
-                "candidate_index": int(match.get("candidate_index", 0)),
-                "template_name": str(match.get("best_name", "")),
-                "score": float(match.get("best_score", 0.0)),
-                "candidate_source": str(match.get("candidate_source", "geometry")),
-                "orientation_deg": int(match.get("best_orientation_deg", 0)),
-                "geometry_score": float(match.get("geometry_score", 0.0)),
-                "texture_rank_score": float(match.get("texture_rank_score", 0.0)),
-                "center_score": float(match.get("center_score", 0.0)),
-                "corner_score": float(match.get("corner_score", 0.0)),
-                "red_score": float(match.get("red_score", 0.0)),
-                "black_score": float(match.get("black_score", 0.0)),
-                "portrait_ink_score": float(match.get("portrait_ink_score", 0.0)),
-                "portrait_edge_score": float(match.get("portrait_edge_score", 0.0)),
-                "portrait_block_ink_score": float(match.get("portrait_block_ink_score", 0.0)),
-                "portrait_block_edge_score": float(match.get("portrait_block_edge_score", 0.0)),
-                "top_band_ink_score": float(match.get("top_band_ink_score", 0.0)),
-                "bottom_band_ink_score": float(match.get("bottom_band_ink_score", 0.0)),
-                "rank_red_score": float(match.get("rank_red_score", 0.0)),
-                "rank_black_score": float(match.get("rank_black_score", 0.0)),
-                "rank_edge_score": float(match.get("rank_edge_score", 0.0)),
-                "letter_ink_score": float(match.get("letter_ink_score", 0.0)),
-                "letter_edge_score": float(match.get("letter_edge_score", 0.0)),
-                "suit_ink_score": float(match.get("suit_ink_score", 0.0)),
-                "suit_edge_score": float(match.get("suit_edge_score", 0.0)),
-            }
-            for match in valid_results
-        ],
     }
     diagnostics["template_best_name"] = template_info["template_best_name"]
     diagnostics["template_best_score"] = template_info["template_best_score"]
-    diagnostics["template_candidate_scores"] = template_info["template_candidate_scores"]
     diagnostics["template_loaded_count"] = template_info["loaded_template_count"]
     diagnostics["template_missing_files"] = template_info["missing_templates"]
 
@@ -1782,7 +1800,7 @@ def solve_texture_aware_solution(
     config: Dict,
     diagnostics: Dict,
 ) -> Optional[Dict]:
-    """在扑克牌模式下让纹理评分和 J/Q/K 模板参与候选解排序。"""
+    """在扑克牌模式下让纹理评分和扑克牌模板参与候选解排序。"""
 
     texture_enabled = texture_pipeline_enabled(config)
     template_enabled = jqk_template_enabled(config)
@@ -1800,6 +1818,16 @@ def solve_texture_aware_solution(
             rerank_top_k,
             int(texture.get("playing_card_candidate_top_k", rerank_top_k)),
             int(jqk_template.get("playing_card_candidate_top_k", rerank_top_k)),
+        )
+    candidate_rerank_enabled = bool(
+        texture.get("candidate_rerank_enabled", texture_enabled)
+    )
+    if is_playing_cards:
+        candidate_rerank_enabled = bool(
+            texture.get(
+                "playing_card_candidate_rerank_enabled",
+                candidate_rerank_enabled,
+            )
         )
     if not texture_enabled and not template_enabled:
         return None
@@ -1852,6 +1880,12 @@ def solve_texture_aware_solution(
     geometry_candidate_min_angle_diff_rad = float(
         solver.get("geometry_candidate_min_angle_diff_rad", 0.0)
     )
+    base_geometry_candidate_limit = int(
+        solver.get("base_geometry_candidate_limit", 0)
+    )
+    perturb_candidate_enabled = bool(
+        solver.get("perturb_candidate_enabled", True)
+    )
     triangle_keep_per_piece = int(solver.get("triangle_keep_per_piece", 0))
     triangle_min_angle_diff_rad = float(
         solver.get("triangle_min_angle_diff_rad", 0.0)
@@ -1880,6 +1914,24 @@ def solve_texture_aware_solution(
     triangle_flip_candidate_quota = int(
         solver.get("triangle_flip_candidate_quota", 0)
     )
+    triangle_flip_overlap_tolerance_extra_mm = float(
+        solver.get("triangle_flip_overlap_tolerance_extra_mm", 0.0)
+    )
+    equilateral_triangle_rotation_enabled = bool(
+        solver.get("equilateral_triangle_rotation_enabled", False)
+    )
+    equilateral_triangle_tolerance_mm = float(
+        solver.get("equilateral_triangle_tolerance_mm", 0.0)
+    )
+    equilateral_triangle_relative_tolerance = float(
+        solver.get("equilateral_triangle_relative_tolerance", 0.0)
+    )
+    equilateral_triangle_shape_penalty = float(
+        solver.get("equilateral_triangle_shape_penalty", 0.0)
+    )
+    equilateral_triangle_rotation_angles_deg = list(
+        solver.get("equilateral_triangle_rotation_angles_deg", [])
+    )
     triangle_flip_partial_diagonal_extra_mm = float(
         solver.get("triangle_flip_partial_diagonal_extra_mm", 0.0)
     )
@@ -1903,6 +1955,18 @@ def solve_texture_aware_solution(
             solver.get(
                 "playing_card_geometry_candidate_min_angle_diff_rad",
                 geometry_candidate_min_angle_diff_rad,
+            )
+        )
+        base_geometry_candidate_limit = int(
+            solver.get(
+                "playing_card_base_geometry_candidate_limit",
+                base_geometry_candidate_limit,
+            )
+        )
+        perturb_candidate_enabled = bool(
+            solver.get(
+                "playing_card_perturb_candidate_enabled",
+                perturb_candidate_enabled,
             )
         )
         triangle_keep_per_piece = int(
@@ -1962,6 +2026,42 @@ def solve_texture_aware_solution(
                 triangle_flip_candidate_quota,
             )
         )
+        triangle_flip_overlap_tolerance_extra_mm = float(
+            solver.get(
+                "playing_card_triangle_flip_overlap_tolerance_extra_mm",
+                triangle_flip_overlap_tolerance_extra_mm,
+            )
+        )
+        equilateral_triangle_rotation_enabled = bool(
+            solver.get(
+                "playing_card_equilateral_triangle_rotation_enabled",
+                equilateral_triangle_rotation_enabled,
+            )
+        )
+        equilateral_triangle_tolerance_mm = float(
+            solver.get(
+                "playing_card_equilateral_triangle_tolerance_mm",
+                equilateral_triangle_tolerance_mm,
+            )
+        )
+        equilateral_triangle_relative_tolerance = float(
+            solver.get(
+                "playing_card_equilateral_triangle_relative_tolerance",
+                equilateral_triangle_relative_tolerance,
+            )
+        )
+        equilateral_triangle_shape_penalty = float(
+            solver.get(
+                "playing_card_equilateral_triangle_shape_penalty",
+                equilateral_triangle_shape_penalty,
+            )
+        )
+        equilateral_triangle_rotation_angles_deg = list(
+            solver.get(
+                "playing_card_equilateral_triangle_rotation_angles_deg",
+                equilateral_triangle_rotation_angles_deg,
+            )
+        )
         triangle_flip_partial_diagonal_extra_mm = float(
             solver.get(
                 "playing_card_triangle_flip_partial_diagonal_extra_mm",
@@ -2017,6 +2117,7 @@ def solve_texture_aware_solution(
             "triangle_flip_requires_similar_edge": triangle_flip_requires_similar_edge,
             "triangle_flip_max_alignments_per_edge_pair": triangle_flip_max_alignments_per_edge_pair,
             "triangle_flip_candidate_quota": triangle_flip_candidate_quota,
+            "triangle_flip_overlap_tolerance_extra_mm": triangle_flip_overlap_tolerance_extra_mm,
             "triangle_flip_partial_diagonal_extra_mm": triangle_flip_partial_diagonal_extra_mm,
             "triangle_flip_partial_area_scale": triangle_flip_partial_area_scale,
             "triangle_flip_priority_bonus": triangle_flip_priority_bonus,
@@ -2033,6 +2134,14 @@ def solve_texture_aware_solution(
             texture.get("fallback_sparse_seam_penalty", 0.08)
         ),
         geometry_candidate_min_angle_diff_rad=geometry_candidate_min_angle_diff_rad,
+        base_geometry_candidate_limit=base_geometry_candidate_limit,
+        candidate_rerank_enabled=candidate_rerank_enabled,
+        perturb_candidate_enabled=perturb_candidate_enabled,
+        equilateral_triangle_rotation_enabled=equilateral_triangle_rotation_enabled,
+        equilateral_triangle_tolerance_mm=equilateral_triangle_tolerance_mm,
+        equilateral_triangle_relative_tolerance=equilateral_triangle_relative_tolerance,
+        equilateral_triangle_rotation_angles_deg=equilateral_triangle_rotation_angles_deg,
+        equilateral_triangle_shape_penalty=equilateral_triangle_shape_penalty,
         angle_perturb_rad=float(texture.get("candidate_angle_perturb_rad", 0.035)),
         translate_perturb_mm=float(texture.get("candidate_translate_perturb_mm", 1.2)),
     )
@@ -2040,9 +2149,23 @@ def solve_texture_aware_solution(
         return None
 
     best_solution = result.get("best_solution")
-    best_texture = result.get("texture") if texture_enabled else None
+    best_texture = (
+        result.get("texture")
+        if texture_enabled and candidate_rerank_enabled
+        else None
+    )
     if best_solution is None:
         return None
+
+    raw_candidate_previews = build_raw_candidate_previews(
+        corrected,
+        pieces,
+        pixels_per_mm,
+        config,
+        result,
+        max_items=max(rerank_top_k, 6),
+    )
+    raw_candidate_gallery = create_candidate_gallery(raw_candidate_previews, columns=3)
 
     template_info = None
     template_visuals = None
@@ -2058,11 +2181,16 @@ def solve_texture_aware_solution(
         reranked_solution, template_info, template_visuals = template_rerank
         if template_info.get("applied"):
             best_solution = reranked_solution
+        if isinstance(template_visuals, dict):
+            template_visuals["candidate_previews"] = raw_candidate_previews
+            template_visuals["candidate_gallery"] = raw_candidate_gallery
 
     if isinstance(best_texture, dict):
         best_texture = dict(best_texture)
         best_texture["candidate_count"] = len(result.get("candidates", []))
-        best_texture["reranked"] = texture_enabled and rerank_top_k > 1
+        best_texture["reranked"] = (
+            texture_enabled and candidate_rerank_enabled and rerank_top_k > 1
+        )
         best_texture["j_shape"] = float(result.get("j_shape", 0.0))
         best_texture["j_texture"] = float(result.get("j_texture", 0.0))
         best_texture["j_total"] = float(result.get("j_total", 0.0))
@@ -2322,7 +2450,7 @@ def print_result_diagnostics(result: Dict) -> None:
         )
     if template:
         print(
-            "  J/Q/K 模板："
+            "  扑克牌模板："
             f"best={template.get('template_best_name', 'N/A')}，"
             f"score={template.get('template_best_score', 0.0):.3f}，"
             f"delta={template.get('template_score_margin', 0.0):.3f}，"
@@ -2391,7 +2519,6 @@ def process_frame(frame: np.ndarray, config: Dict, output_dir: Path) -> Tuple[Di
         "template_enabled": jqk_template_enabled(config),
         "template_best_name": "",
         "template_best_score": 0.0,
-        "template_candidate_scores": [],
     }
 
     if not 2 <= len(pieces) <= 4:

@@ -16,6 +16,7 @@ enum {
 typedef enum {
     GIMBAL2_LINK_STATE_IDLE = 0,
     GIMBAL2_LINK_STATE_READY,
+    GIMBAL2_LINK_STATE_POKER,
     GIMBAL2_LINK_STATE_PICK,
     GIMBAL2_LINK_STATE_BUSY,
     GIMBAL2_LINK_STATE_FINISH,
@@ -27,6 +28,7 @@ typedef struct {
     uint32_t last_rx_tick_ms;
     bool new_flag;
     bool ready_flag;
+    bool ok_flag;
     bool pick_flag;
     bool finish_flag;
     bool busy_flag;
@@ -44,6 +46,8 @@ bool Gimbal2Link_ClearFlags(void);
 
 bool Gimbal2Link_SendTask(float angle1, float angle2);
 bool Gimbal2Link_SendLine(const char *line);
+bool Gimbal2Link_SendStart(void);
+bool Gimbal2Link_SendWin(void);
 
 #ifdef __cplusplus
 }

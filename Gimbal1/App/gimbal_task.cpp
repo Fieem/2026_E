@@ -36,6 +36,8 @@ enum class ExecuteState : uint8_t {
     MoveJ1ToPlace,
     WaitJ1Place,
     WaitGimbal2Finish,
+    ReturnJ1Home,
+    WaitJ1Home,
 };
 
 ExecuteState execute_state = ExecuteState::Idle;
@@ -44,6 +46,7 @@ uint8_t execute_piece_index = 0U;
 uint16_t last_completed_sequence = 0U;
 uint32_t execute_stage_started_tick = 0U;
 uint32_t vision_start_min_execute_tick = 0U;
+uint32_t execute_home_stable_since_tick = 0U;
 
 float wrapToTwoPi(float angle_rad) {
     angle_rad = std::fmod(angle_rad, kTwoPi);
@@ -190,6 +193,7 @@ void finishSequence(void) {
     execute_piece_index = 0U;
     execute_stage_started_tick = 0U;
     vision_start_min_execute_tick = 0U;
+    execute_home_stable_since_tick = 0U;
     execute_state = ExecuteState::Idle;
 }
 
@@ -204,6 +208,7 @@ void startExecution(const ScaraVisionResult &result, uint32_t now_ms) {
         --execute_piece_index;
     }
     Gimbal2Link_ClearFlags();
+    execute_home_stable_since_tick = 0U;
     startExecuteStage(ExecuteState::MoveJ1ToPick, now_ms);
 }
 
@@ -213,10 +218,17 @@ void updateVisionStartTrigger(uint32_t now_ms) {
 
     Gimbal2LinkStatus gimbal2_status{};
     (void)Gimbal2Link_GetStatus(&gimbal2_status);
-    if (!gimbal2_status.ready_flag) return;
+    if (!gimbal2_status.ready_flag && !gimbal2_status.ok_flag) return;
     if (Vision_GetState() == SCARA_VISION_STATE_WAITING) return;
 
-    if (Vision_RequestStart()) {
+    const ScaraVisionMode mode = gimbal2_status.ok_flag
+                                     ? SCARA_VISION_MODE_POKER
+                                     : SCARA_VISION_MODE_BASIC;
+    if (Vision_RequestStart(mode)) {
+        if (!Gimbal2Link_SendStart()) {
+            enterFault();
+            return;
+        }
         vision_start_min_execute_tick = now_ms + kVisionStartMinExecuteDelayMs;
     }
     Gimbal2Link_ClearFlags();
@@ -304,7 +316,8 @@ void updateExecution(uint32_t now_ms) {
         if (!gimbal2_status.finish_flag) break;
         Gimbal2Link_ClearFlags();
         if ((execute_piece_index + 1U) >= execute_result.expected_piece_count) {
-            finishSequence();
+            execute_home_stable_since_tick = 0U;
+            startExecuteStage(ExecuteState::ReturnJ1Home, now_ms);
         } else {
             execute_result = ScaraVisionResult{};
             execute_piece_index = 0U;
@@ -315,6 +328,29 @@ void updateExecution(uint32_t now_ms) {
                 return;
             }
         }
+        break;
+
+    case ExecuteState::ReturnJ1Home:
+        commandJ1JointAngle(kStartupHomeJointAngleRad, now_ms);
+        execute_home_stable_since_tick = 0U;
+        startExecuteStage(ExecuteState::WaitJ1Home, now_ms);
+        break;
+
+    case ExecuteState::WaitJ1Home:
+        if (!j1AtTarget(kStartupHomeJointAngleRad)) {
+            execute_home_stable_since_tick = 0U;
+            break;
+        }
+        if (execute_home_stable_since_tick == 0U) {
+            execute_home_stable_since_tick = now_ms;
+            break;
+        }
+        if ((now_ms - execute_home_stable_since_tick) < kStartupHomeStableMs) break;
+        if (!Gimbal2Link_SendWin()) {
+            enterFault();
+            return;
+        }
+        finishSequence();
         break;
     }
 }

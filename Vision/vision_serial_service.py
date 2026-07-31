@@ -36,6 +36,8 @@ from serial_protocol import (
     FrameParser,
     VISION_NEXT,
     VISION_START,
+    VISION_START_BASIC,
+    VISION_START_POKER,
     decode_flags,
     pack_error,
     pack_result,
@@ -266,7 +268,7 @@ def run_service(
                 for frame in parser.feed(received):
                     sequence, piece_count, piece_index = decode_flags(frame.flags)
 
-                    if frame.command == VISION_START:
+                    if frame.command in (VISION_START, VISION_START_BASIC, VISION_START_POKER):
                         del piece_count, piece_index
                         if cached_sequence == sequence and cached_responses:
                             port.write(cached_responses[0])
@@ -274,17 +276,25 @@ def run_service(
                             print(f"重复任务 {sequence}，已重发第 0 块结果")
                             continue
 
-                        print(f"收到任务 {sequence}，开始采图和识别")
+                        if frame.command == VISION_START_POKER:
+                            mode = "playing_cards"
+                        elif frame.command == VISION_START_BASIC:
+                            mode = "plain"
+                        else:
+                            mode = str(config.get("piece_mode", "plain"))
+                        mode_config = dict(config)
+                        mode_config["piece_mode"] = mode
+                        print(f"收到任务 {sequence}，模式={mode}，开始采图和识别")
                         responses: List[bytes]
                         try:
                             try:
-                                parameters = ScaraParameters.from_config(config)
+                                parameters = ScaraParameters.from_config(mode_config)
                             except KinematicsError as error:
                                 if "尚未配置" in str(error):
                                     raise ValueError(str(error)) from error
                                 raise
                             image = camera.read()
-                            result, _ = process_frame(image, config, output_dir)
+                            result, _ = process_frame(image, mode_config, output_dir)
                             if result.get("status") != "ok":
                                 responses = []
                                 print(f"任务 {sequence} 失败：{result['message']}")
