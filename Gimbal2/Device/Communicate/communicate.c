@@ -11,6 +11,8 @@
 #include <string.h>
 #include <stdlib.h>
 
+#include "Emm_V5/Emm_V5.h"
+
 /* ============================================================
  *  环形缓冲区（ISR 安全，单生产者单消费者）
  * ============================================================ */
@@ -93,6 +95,8 @@ static void comm_pi_parse_line(const char *line)
     }
     else if (strcmp_upper(cmd, "WIN") == 0) {
         comm_win_flag = true;
+        Emm_V5_Origin_Trigger_Return(1,0,false);
+        Emm_V5_Origin_Trigger_Return(2,0,false);
         printsf(0, "WIN");
     }
     else if (strcmp_upper(cmd, "START") == 0) {

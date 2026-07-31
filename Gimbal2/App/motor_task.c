@@ -42,7 +42,7 @@ void StartMotorTask(void *argument)
         case ARM_MOVING_TO_START:
             osDelay(MOTOR_DELAY_MS);
             Arm_SetState(ARM_SERVO_PICK_DOWN);
-            SG90_SetAngle(CalcPickAngle(s_pick_x));
+            SG90_SetAngle(CalcPickAngleLut(s_pick_x));
             break;
 
         case ARM_SERVO_PICK_DOWN:
