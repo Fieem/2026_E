@@ -2142,12 +2142,35 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
             equilateral_triangle_indices.append(pi)
 
     candidate_signatures = {_pose_signature(candidate) for candidate in candidates}
+    rotation_debug = {
+        "attempts": 0,
+        "successes": 0,
+        "duplicates": 0,
+        "reject_reasons": {
+            "missing_pose": 0,
+            "missing_local_points": 0,
+            "no_contact_pairs": 0,
+            "missing_fixed_polygon": 0,
+            "no_alignment_centers": 0,
+            "overlap": 0,
+            "invalid_rectangle": 0,
+        },
+        "reject_samples": [],
+    }
+
+    def _record_rotation_reject(reason: str, detail: str) -> None:
+        reasons = rotation_debug["reject_reasons"]
+        reasons[reason] = int(reasons.get(reason, 0)) + 1
+        samples = rotation_debug["reject_samples"]
+        if len(samples) < 12:
+            samples.append(f"{reason}: {detail}")
 
     def _build_rotated_triangle_candidate(
         current_candidate: Dict,
         triangle_index: int,
         angle_deg: float,
     ) -> Optional[Dict]:
+        rotation_debug["attempts"] += 1
         current_poses = current_candidate.get("poses", {})
         current_world = current_candidate.get("world_polygons", {})
         current_placements = current_candidate.get("placements", [])
@@ -2156,11 +2179,19 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
             or not current_world
             or not current_placements
         ):
+            _record_rotation_reject(
+                "missing_pose",
+                f"piece={int(triangle_index)}, angle={int(round(angle_deg))}",
+            )
             return None
 
         current_angle, current_center = current_poses[triangle_index]
         triangle_local_points = local_pts.get(triangle_index)
         if not triangle_local_points:
+            _record_rotation_reject(
+                "missing_local_points",
+                f"piece={int(triangle_index)}, angle={int(round(angle_deg))}",
+            )
             return None
 
         contact_pairs = _find_piece_contact_pairs(
@@ -2178,15 +2209,24 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
             max_pairs=3,
         )
         if not contact_pairs:
+            _record_rotation_reject(
+                "no_contact_pairs",
+                f"piece={int(triangle_index)}, angle={int(round(angle_deg))}",
+            )
             return None
 
         desired_angle = _angle_wrap(current_angle + math.radians(angle_deg))
         best_alt = None
         best_alt_score = float("inf")
+        missing_fixed_polygon_count = 0
+        no_alignment_centers_count = 0
+        overlap_count = 0
+        invalid_rectangle_count = 0
 
         for pair in contact_pairs:
             fixed_polygon = current_world.get(int(pair["fixed_index"]))
             if not fixed_polygon:
+                missing_fixed_polygon_count += 1
                 continue
             fixed_start, fixed_end = _edge(
                 fixed_polygon,
@@ -2216,6 +2256,7 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
                     True,
                 )
                 if not centers:
+                    no_alignment_centers_count += 1
                     continue
                 for center, _contact_ratio, _contact_length in centers:
                     rotated_world = {
@@ -2236,6 +2277,7 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
                         for idx, polygon in current_world.items()
                         if idx != triangle_index
                     ):
+                        overlap_count += 1
                         continue
                     rotated_world[triangle_index] = rotated_triangle
                     support_pairs = _find_piece_contact_pairs(
@@ -2266,6 +2308,7 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
                         ]
                     )
                     if rectangle is None or rectangle["area"] <= EPS:
+                        invalid_rectangle_count += 1
                         continue
                     area_error = abs(rectangle["area"] - total_piece_area) / rectangle["area"]
                     local_score = (
@@ -2321,6 +2364,31 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
                     alt["placements"] = alt_placements
                     best_alt = alt
                     best_alt_score = local_score
+        if best_alt is None:
+            detail = (
+                f"piece={int(triangle_index)}, angle={int(round(angle_deg))}, "
+                f"missing_fixed={missing_fixed_polygon_count}, "
+                f"no_center={no_alignment_centers_count}, "
+                f"overlap={overlap_count}, "
+                f"bad_rect={invalid_rectangle_count}"
+            )
+            if missing_fixed_polygon_count > 0:
+                _record_rotation_reject("missing_fixed_polygon", detail)
+            if no_alignment_centers_count > 0:
+                _record_rotation_reject("no_alignment_centers", detail)
+            if overlap_count > 0:
+                _record_rotation_reject("overlap", detail)
+            if invalid_rectangle_count > 0:
+                _record_rotation_reject("invalid_rectangle", detail)
+            if (
+                missing_fixed_polygon_count == 0
+                and no_alignment_centers_count == 0
+                and overlap_count == 0
+                and invalid_rectangle_count == 0
+            ):
+                _record_rotation_reject("no_alignment_centers", detail)
+            return None
+        rotation_debug["successes"] += 1
         return best_alt
 
     # Step 2: For near-equilateral triangles, additionally test 60° / 120°
@@ -2359,6 +2427,17 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
                         return
                     signature = _pose_signature(current_candidate)
                     if signature in candidate_signatures:
+                        rotation_debug["duplicates"] += 1
+                        samples = rotation_debug["reject_samples"]
+                        if len(samples) < 12:
+                            rotation_steps = current_candidate.get("triangle_rotation_steps", [])
+                            samples.append(
+                                "duplicate_solution: "
+                                + ", ".join(
+                                    f"p{int(step.get('piece_index', 0))}={int(step.get('angle_deg', 0))}"
+                                    for step in rotation_steps
+                                )
+                            )
                         return
                     candidate_signatures.add(signature)
                     candidates.append(current_candidate)
@@ -2390,6 +2469,14 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
                     )
 
             _enumerate_triangle_rotation_combinations(0, base_candidate, False)
+
+    diagnostics_ref = geometry_kwargs.get("diagnostics")
+    if isinstance(diagnostics_ref, dict):
+        diagnostics_ref["triangle_rotation_attempts"] = int(rotation_debug["attempts"])
+        diagnostics_ref["triangle_rotation_successes"] = int(rotation_debug["successes"])
+        diagnostics_ref["triangle_rotation_duplicates"] = int(rotation_debug["duplicates"])
+        diagnostics_ref["triangle_rotation_reject_reasons"] = dict(rotation_debug["reject_reasons"])
+        diagnostics_ref["triangle_rotation_reject_samples"] = list(rotation_debug["reject_samples"])
 
     # Step 3: Generate perturbed alternatives to fill the remaining slots
     base_solution = candidates[0]

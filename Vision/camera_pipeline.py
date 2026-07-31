@@ -2438,6 +2438,7 @@ def print_result_diagnostics(result: Dict) -> None:
     print(f"[{result['timestamp']}] {result['message']}")
     texture = result.get("texture")
     template = result.get("template")
+    diagnostics = result.get("diagnostics", {})
     if texture:
         print(
             "  纹理评分："
@@ -2457,6 +2458,29 @@ def print_result_diagnostics(result: Dict) -> None:
             f"candidates={template.get('candidate_count', 0)}，"
             f"fallback={'yes' if template.get('fallback_triggered') else 'no'}"
         )
+    if diagnostics.get("triangle_rotation_attempts", 0) > 0:
+        reject_reasons = diagnostics.get("triangle_rotation_reject_reasons", {})
+        print(
+            "  三角形旋转候选："
+            f"attempts={diagnostics.get('triangle_rotation_attempts', 0)}，"
+            f"successes={diagnostics.get('triangle_rotation_successes', 0)}，"
+            f"duplicates={diagnostics.get('triangle_rotation_duplicates', 0)}"
+        )
+        print(
+            "    丢弃原因："
+            f"missing_pose={reject_reasons.get('missing_pose', 0)}，"
+            f"missing_local_points={reject_reasons.get('missing_local_points', 0)}，"
+            f"no_contact_pairs={reject_reasons.get('no_contact_pairs', 0)}，"
+            f"missing_fixed_polygon={reject_reasons.get('missing_fixed_polygon', 0)}，"
+            f"no_alignment_centers={reject_reasons.get('no_alignment_centers', 0)}，"
+            f"overlap={reject_reasons.get('overlap', 0)}，"
+            f"invalid_rectangle={reject_reasons.get('invalid_rectangle', 0)}"
+        )
+        reject_samples = diagnostics.get("triangle_rotation_reject_samples", [])
+        if reject_samples:
+            print("    丢弃样例：")
+            for sample in reject_samples[:8]:
+                print(f"      - {sample}")
     if result.get("status") == "ok":
         overlap_adjustment = result.get("overlap_adjustment")
         if overlap_adjustment and overlap_adjustment.get("enabled"):
@@ -2468,7 +2492,6 @@ def print_result_diagnostics(result: Dict) -> None:
             )
         return
 
-    diagnostics = result.get("diagnostics", {})
     print(f"  失败原因：{diagnose_solver_failure(diagnostics)}")
     if diagnostics:
         print(
