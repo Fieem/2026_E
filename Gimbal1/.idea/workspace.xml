@@ -37,7 +37,6 @@
   <component name="ChangeListManager">
     <list default="true" id="1f7f0edf-0229-41fd-adbd-51ee79e766d0" name="更改" comment="Gimbal1_init">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../Vision/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/../Vision/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/../Vision/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/../Vision/README.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/../Vision/camera_pipeline.py" beforeDir="false" afterPath="$PROJECT_DIR$/../Vision/camera_pipeline.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/../Vision/vision_config.json" beforeDir="false" afterPath="$PROJECT_DIR$/../Vision/vision_config.json" afterDir="false" />
@@ -190,7 +189,7 @@
       <workItem from="1785331283477" duration="315000" />
       <workItem from="1785331614207" duration="313000" />
       <workItem from="1785331933963" duration="1150000" />
-      <workItem from="1785374075256" duration="25087000" />
+      <workItem from="1785374075256" duration="26276000" />
     </task>
     <task id="LOCAL-00001" summary="7.5start">
       <option name="closed" value="true" />

@@ -2,18 +2,20 @@
 
 将 12 张标准整牌模板按以下文件名放入本目录：
 
-- `spade_J.png`
-- `spade_Q.png`
-- `spade_K.png`
-- `heart_J.png`
-- `heart_Q.png`
-- `heart_K.png`
-- `club_J.png`
-- `club_Q.png`
-- `club_K.png`
-- `diamond_J.png`
-- `diamond_Q.png`
-- `diamond_K.png`
+- `spade_J.jpg`
+- `spade_Q.jpg`
+- `spade_K.jpg`
+- `heart_J.jpg`
+- `heart_Q.jpg`
+- `heart_K.jpg`
+- `club_J.jpg`
+- `club_Q.jpg`
+- `club_K.jpg`
+- `diamond_J.jpg`
+- `diamond_Q.jpg`
+- `diamond_K.jpg`
+
+当前代码默认按 `.jpg` 查找，也兼容同名的 `.jpeg` 和 `.png`。
 
 模板要求：
 

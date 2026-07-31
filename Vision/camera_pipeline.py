@@ -591,20 +591,41 @@ def extract_playing_card_pattern_masks(
     hsv = cv2.cvtColor(corrected, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(corrected, cv2.COLOR_BGR2GRAY)
     valid = foreground_mask > 0
+    blue = corrected[:, :, 0].astype(np.int16)
+    green = corrected[:, :, 1].astype(np.int16)
+    red = corrected[:, :, 2].astype(np.int16)
 
     hue = hsv[:, :, 0].astype(np.int16)
     saturation = hsv[:, :, 1].astype(np.uint8)
     value = hsv[:, :, 2].astype(np.uint8)
+    chroma_span = (
+        np.max(corrected.astype(np.int16), axis=2)
+        - np.min(corrected.astype(np.int16), axis=2)
+    ).astype(np.uint8)
+    red_dominance = (red - np.maximum(green, blue)).astype(np.int16)
 
-    # 红色牌面在实际拍摄里常会因为阴影、反光和透视边缘导致饱和度下降，
-    # 因此这里对红色色相范围放宽一些，同时降低最小饱和度和亮度门槛。
+    # 红色容易把皮肤色、黄底和浅色印刷一起吸进去，因此除了色相之外，
+    # 还要求有足够的饱和度和红通道优势。
     red_mask = (
-        (((hue <= 18) | (hue >= 160)) & (saturation >= 40) & (value >= 25) & valid)
+        (
+            ((hue <= 16) | (hue >= 165))
+            & (saturation >= 52)
+            & (value >= 30)
+            & (red_dominance >= 18)
+            & valid
+        )
         .astype(np.uint8)
         * 255
     )
     black_mask = (
-        ((gray <= 118) & (value <= 150) & (~(red_mask > 0)) & valid).astype(np.uint8)
+        (
+            (
+                ((gray <= 112) & (value <= 138) & (saturation <= 72) & (chroma_span <= 72))
+                | ((gray <= 90) & (value <= 108))
+            )
+            & (~(red_mask > 0))
+            & valid
+        ).astype(np.uint8)
         * 255
     )
 
@@ -612,6 +633,7 @@ def extract_playing_card_pattern_masks(
     red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
     red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
     black_mask = cv2.morphologyEx(black_mask, cv2.MORPH_OPEN, kernel)
+    black_mask = cv2.morphologyEx(black_mask, cv2.MORPH_CLOSE, kernel)
     return red_mask, black_mask
 
 
@@ -797,9 +819,17 @@ def extract_piece_texture(
 
     polygon = polygon_px.astype(np.int32)
     x, y, width, height = cv2.boundingRect(polygon)
-    crop = corrected[y:y + height, x:x + width].copy()
-    relative_polygon = polygon - np.array([[x, y]], dtype=np.int32)
-    mask = np.zeros((height, width), dtype=np.uint8)
+    image_height, image_width = corrected.shape[:2]
+    x0 = max(0, int(x))
+    y0 = max(0, int(y))
+    x1 = min(image_width, int(x + width))
+    y1 = min(image_height, int(y + height))
+    if x1 <= x0 or y1 <= y0:
+        empty_image = np.zeros((1, 1, 3), dtype=corrected.dtype)
+        return empty_image, [Pt(0.0, 0.0)]
+    crop = corrected[y0:y1, x0:x1].copy()
+    relative_polygon = polygon - np.array([[x0, y0]], dtype=np.int32)
+    mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
     cv2.fillPoly(mask, [relative_polygon], 255)
     piece_image = cv2.bitwise_and(crop, crop, mask=mask)
     polygon_in_image = [
@@ -1338,7 +1368,23 @@ def create_result_image(
     combined = top_row
 
     if template_visuals:
-        card_preview = template_visuals.get("card_preview")
+        jqk_template = config.get("jqk_template", {})
+        final_card_preview = None
+        if solution is not None:
+            final_card_preview = render_solution_card_preview(
+                corrected,
+                pieces,
+                solution,
+                pixels_per_mm,
+                config,
+                int(jqk_template.get("canvas_width_px", 256)),
+                int(jqk_template.get("canvas_height_px", 384)),
+            )
+        card_preview = (
+            final_card_preview
+            if isinstance(final_card_preview, np.ndarray)
+            else template_visuals.get("card_preview")
+        )
         template_preview = template_visuals.get("template_preview")
         mask_comparison = template_visuals.get("mask_comparison")
         if (
@@ -1348,7 +1394,7 @@ def create_result_image(
         ):
             bottom_row = np.hstack(
                 (
-                    create_result_panel(card_preview, "ASSEMBLED CARD", panel_size),
+                    create_result_panel(card_preview, "FINAL ASSEMBLED CARD", panel_size),
                     separator.copy(),
                     create_result_panel(template_preview, "BEST JQK TEMPLATE", panel_size),
                     separator.copy(),
@@ -1440,6 +1486,14 @@ def rerank_solution_with_jqk_templates(
         match["candidate_index"] = candidate_index
         match["geometry_score"] = float(candidate.get("j_shape", solution.get("score", 0.0)))
         match["texture_rank_score"] = float(candidate.get("j_total", solution.get("score", 0.0)))
+        texture_info = candidate.get("texture", {}) if isinstance(candidate.get("texture"), dict) else {}
+        match["texture_fallback_full_rect"] = bool(
+            texture_info.get("fallback_full_rect", False)
+        )
+        match["texture_fallback_sparse_seam"] = bool(
+            texture_info.get("fallback_sparse_seam", False)
+        )
+        match["texture_seam_count"] = len(texture_info.get("seam_scores", []))
         match["solution"] = solution
         match_results.append(match)
 
@@ -1460,15 +1514,35 @@ def rerank_solution_with_jqk_templates(
     best_match = valid_results[0]
     second_score = float(valid_results[1].get("best_score", 0.0)) if len(valid_results) >= 2 else 0.0
     score_margin = float(best_match.get("best_score", 0.0)) - second_score
-    min_confidence = float(jqk_template.get("min_confidence", 0.62))
+    min_confidence = float(jqk_template.get("min_confidence", 0.58))
+    fallback_relaxed_confidence = float(
+        jqk_template.get("fallback_relaxed_confidence", 0.56)
+    )
+    min_margin = float(jqk_template.get("min_margin", 0.0))
     fallback_to_texture = bool(jqk_template.get("fallback_to_texture", True))
-    fallback_triggered = fallback_to_texture and float(best_match.get("best_score", 0.0)) < min_confidence
-    applied = not fallback_triggered
+    force_best_candidate = bool(
+        jqk_template.get("force_best_candidate", False)
+    )
+    texture_is_weak = bool(best_match.get("texture_fallback_full_rect", False)) or (
+        bool(best_match.get("texture_fallback_sparse_seam", False))
+        and int(best_match.get("texture_seam_count", 0)) == 0
+    )
+    effective_min_confidence = (
+        fallback_relaxed_confidence if texture_is_weak else min_confidence
+    )
+    fallback_triggered = (not force_best_candidate) and fallback_to_texture and (
+        float(best_match.get("best_score", 0.0)) < effective_min_confidence
+        or float(score_margin) < min_margin
+    )
+    applied = force_best_candidate or (not fallback_triggered)
 
     template_info = {
         "enabled": True,
         "applied": applied,
         "fallback_triggered": fallback_triggered,
+        "force_best_candidate": force_best_candidate,
+        "texture_is_weak": texture_is_weak,
+        "effective_min_confidence": float(effective_min_confidence),
         "candidate_count": len(valid_results),
         "template_best_name": str(best_match.get("best_name", "")),
         "template_best_score": float(best_match.get("best_score", 0.0)),
@@ -1485,6 +1559,23 @@ def rerank_solution_with_jqk_templates(
                 "orientation_deg": int(match.get("best_orientation_deg", 0)),
                 "geometry_score": float(match.get("geometry_score", 0.0)),
                 "texture_rank_score": float(match.get("texture_rank_score", 0.0)),
+                "center_score": float(match.get("center_score", 0.0)),
+                "corner_score": float(match.get("corner_score", 0.0)),
+                "red_score": float(match.get("red_score", 0.0)),
+                "black_score": float(match.get("black_score", 0.0)),
+                "portrait_ink_score": float(match.get("portrait_ink_score", 0.0)),
+                "portrait_edge_score": float(match.get("portrait_edge_score", 0.0)),
+                "portrait_block_ink_score": float(match.get("portrait_block_ink_score", 0.0)),
+                "portrait_block_edge_score": float(match.get("portrait_block_edge_score", 0.0)),
+                "top_band_ink_score": float(match.get("top_band_ink_score", 0.0)),
+                "bottom_band_ink_score": float(match.get("bottom_band_ink_score", 0.0)),
+                "rank_red_score": float(match.get("rank_red_score", 0.0)),
+                "rank_black_score": float(match.get("rank_black_score", 0.0)),
+                "rank_edge_score": float(match.get("rank_edge_score", 0.0)),
+                "letter_ink_score": float(match.get("letter_ink_score", 0.0)),
+                "letter_edge_score": float(match.get("letter_edge_score", 0.0)),
+                "suit_ink_score": float(match.get("suit_ink_score", 0.0)),
+                "suit_edge_score": float(match.get("suit_edge_score", 0.0)),
             }
             for match in valid_results
         ],
@@ -1570,7 +1661,17 @@ def solve_texture_aware_solution(
         lambda_texture=float(texture.get("lambda_texture", 0.5)) if texture_enabled else 0.0,
         top_k=rerank_top_k,
         geometry_kwargs={
-            "overlap_tolerance_mm": float(solver.get("overlap_tolerance_mm", 2.5)),
+            "edge_tolerance_mm": float(solver.get("edge_tolerance_mm", 3.0)),
+            "edge_relative_tolerance": float(
+                solver.get("edge_relative_tolerance", 0.05)
+            ),
+            "minimum_edge_contact_mm": float(
+                solver.get("minimum_edge_contact_mm", 5.0)
+            ),
+            "minimum_edge_contact_ratio": float(
+                solver.get("minimum_edge_contact_ratio", 0.6)
+            ),
+            "overlap_tolerance_mm": float(solver.get("overlap_tolerance_mm", 4.0)),
             "rectangle_area_tolerance": float(
                 solver.get("rectangle_area_tolerance", 0.06)
             ),
@@ -1582,6 +1683,15 @@ def solve_texture_aware_solution(
                 solver.get("dimension_tolerance_mm", 3.0)
             ),
             "max_search_nodes": int(solver.get("max_search_nodes", 20_000)),
+            "max_candidates_per_node": int(
+                solver.get("max_candidates_per_node", 128)
+            ),
+            "max_partial_candidates_per_node": int(
+                solver.get("max_partial_candidates_per_node", 32)
+            ),
+            "max_complete_solutions": int(
+                solver.get("max_complete_solutions", max(rerank_top_k, 12))
+            ),
             "diagnostics": diagnostics,
         },
         gw=float(texture.get("gradient_weight", 0.35)),
@@ -1977,11 +2087,12 @@ def process_frame(frame: np.ndarray, config: Dict, output_dir: Path) -> Tuple[Di
             template_visuals = texture_solved.get("template_visuals")
             texture_rerank_info = texture_info
         else:
+            solver_config = config.get("solver", {})
             solution = find_rectangle_solution(
                 [{"pts": piece.points_mm} for piece in pieces],
                 target_center=target_center,
                 overlap_tolerance_mm=float(
-                    config.get("solver", {}).get("overlap_tolerance_mm", 2.5)
+                    solver_config.get("overlap_tolerance_mm", 2.5)
                 ),
                 diagnostics=diagnostics,
             )

@@ -1,20 +1,19 @@
 ﻿"""
-texture_scorer.py - æ‰‘å…‹ç‰Œç¢Žç‰‡çº¹ç†è¿žç»­æ€§è¯„åˆ† + è”åˆæ±‚è§£ (merged)
+texture_scorer.py - 扑克牌碎片纹理评分与联合求解
 
-ç”¨æ³•:
+用法：
     from texture_scorer import TextureScorer, solve_with_texture
     result = solve_with_texture(pieces_geometry, pieces_texture, target_center)
 """
 
-import sys, math, copy, numpy as np
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from __future__ import annotations
 
-try:
-    import cv2
-except ImportError:
-    _p = r"D:\.codex\visualizations\2026\07\29\019fab5a-1829-7a40-8497-9086f35e901b\opencv_pkg"
-    if _p not in sys.path: sys.path.insert(0, _p)
-    import cv2
+import copy
+import math
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+import cv2
+import numpy as np
 
 
 
@@ -522,18 +521,21 @@ def find_rectangle_solution(
     pieces: Sequence[Dict],
     target_center: Optional[Pt] = None,
     *,
-    edge_tolerance_mm: float = 15.0,
-    edge_relative_tolerance: float = 0.30,
-    minimum_edge_contact_mm: float = 0.5,
-    minimum_edge_contact_ratio: float = 0.05,
-    overlap_tolerance_mm: float = 0.0,
-    rectangle_area_tolerance: float = 0.50,
+    edge_tolerance_mm: float = 3.0,
+    edge_relative_tolerance: float = 0.05,
+    minimum_edge_contact_mm: float = 5.0,
+    minimum_edge_contact_ratio: float = 0.6,
+    overlap_tolerance_mm: float = 4.0,
+    rectangle_area_tolerance: float = 0.06,
     size_range_mm: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = (
-        (30.0, 130.0),
-        (40.0, 200.0),
+        (40.0, 100.0),
+        (80.0, 130.0),
     ),
-    dimension_tolerance_mm: float = 15.0,
-    max_search_nodes: int = 100_000,
+    dimension_tolerance_mm: float = 3.0,
+    max_search_nodes: int = 20_000,
+    max_candidates_per_node: int = 128,
+    max_partial_candidates_per_node: int = 32,
+    max_complete_solutions: int = 12,
     diagnostics: Optional[Dict] = None,
 ) -> Optional[Dict]:
     """寻找一个互不重叠且组合后能够填满矩形的布局。
@@ -588,6 +590,8 @@ def find_rectangle_solution(
         )
     }
     best_solution: Optional[Dict] = None
+    complete_solutions: List[Dict] = []
+    complete_solution_keys: Set[Tuple] = set()
     search_nodes = 0
     stats = {
         "search_nodes": 0,
@@ -604,26 +608,36 @@ def find_rectangle_solution(
         "dimension_rejections": 0,
         "area_rejections": 0,
         "no_candidate_nodes": 0,
+        "candidate_pruned_by_limit": 0,
         "candidate_counts_by_depth": [],
         "anchor_index": anchor_index,
         "piece_count": len(prepared),
         "total_piece_area_mm2": total_piece_area,
     }
 
-    def partial_geometry_valid(candidate_polygons: Iterable[Sequence[Pt]]) -> bool:
-        if size_range_mm is None:
-            return True
+    def partial_geometry_rectangle(
+        candidate_polygons: Iterable[Sequence[Pt]],
+    ) -> Optional[Dict]:
+        maximum_final_area = float("inf")
+        if size_range_mm is not None:
+            maximum_final_area = total_piece_area / max(
+                1.0 - rectangle_area_tolerance, EPS
+            )
         all_points = [point for polygon in candidate_polygons for point in polygon]
         rectangle = minimum_area_rectangle(all_points)
         if rectangle is None:
-            return False
+            return None
+        if rectangle["area"] > maximum_final_area + EPS:
+            return None
+        if size_range_mm is None:
+            return rectangle
         short_range, long_range = size_range_mm
         maximum_area = (
             (short_range[1] + dimension_tolerance_mm)
             * (long_range[1] + dimension_tolerance_mm)
         )
         if rectangle["area"] > maximum_area + EPS:
-            return False
+            return None
 
         maximum_diagonal = math.hypot(
             short_range[1] + dimension_tolerance_mm,
@@ -632,8 +646,8 @@ def find_rectangle_solution(
         for first_index, first in enumerate(all_points):
             for second in all_points[first_index + 1 :]:
                 if first.dist(second) > maximum_diagonal:
-                    return False
-        return True
+                    return None
+        return rectangle
 
     def evaluate(edge_error: float) -> bool:
         nonlocal best_solution
@@ -656,10 +670,22 @@ def find_rectangle_solution(
             return False
 
         score = area_error * 1.0 + edge_error * 0.05 / max(1, len(prepared) - 1)
-        if best_solution is not None and score >= best_solution["score"]:
+        solution_key = tuple(
+            sorted(
+                (
+                    int(index),
+                    round(angle, 6),
+                    round(center.x, 3),
+                    round(center.y, 3),
+                )
+                for index, (angle, center) in poses.items()
+            )
+        )
+        if solution_key in complete_solution_keys:
             return False
+        complete_solution_keys.add(solution_key)
 
-        best_solution = {
+        solution_record = {
             "score": score,
             "area_error": area_error,
             "rectangle": rectangle,
@@ -668,6 +694,24 @@ def find_rectangle_solution(
                 index: list(points) for index, points in world_polygons.items()
             },
         }
+        complete_solutions.append(solution_record)
+        complete_solutions.sort(key=lambda solution: solution["score"])
+        if len(complete_solutions) > max_complete_solutions:
+            removed = complete_solutions.pop()
+            removed_key = tuple(
+                sorted(
+                    (
+                        int(index),
+                        round(angle, 6),
+                        round(center.x, 3),
+                        round(center.y, 3),
+                    )
+                    for index, (angle, center) in removed["poses"].items()
+                )
+            )
+            if removed_key != solution_key:
+                complete_solution_keys.discard(removed_key)
+        best_solution = complete_solutions[0]
         return True
 
     def recurse(edge_error: float) -> bool:
@@ -676,16 +720,20 @@ def find_rectangle_solution(
         stats["search_nodes"] = search_nodes
         if search_nodes > max_search_nodes:
             stats["search_limit_reached"] = True
-            return False
+            return True
         if len(poses) == len(prepared):
-            return evaluate(edge_error)
+            evaluate(edge_error)
+            return False
 
         candidate_keys: Set[Tuple] = set()
         candidates = []
+        placed_polygons = list(world_polygons.values())
+        current_placed_area = sum(prepared[index]["area"] for index in poses)
         unplaced = [piece["index"] for piece in prepared if piece["index"] not in poses]
 
         for moving_index in unplaced:
             moving_points = prepared[moving_index]["local_points"]
+            moving_area = prepared[moving_index]["area"]
             for fixed_index, fixed_polygon in list(world_polygons.items()):
                 for fixed_edge_index in range(len(fixed_polygon)):
                     fixed_start, fixed_end = _edge(fixed_polygon, fixed_edge_index)
@@ -733,39 +781,30 @@ def find_rectangle_solution(
                                     placed_polygon,
                                     overlap_tolerance_mm,
                                 )
-                                for placed_polygon in world_polygons.values()
+                                for placed_polygon in placed_polygons
                             ):
                                 stats["overlap_rejections"] += 1
                                 continue
-                            if not partial_geometry_valid(
-                                list(world_polygons.values()) + [candidate_polygon]
-                            ):
+                            partial_rectangle = partial_geometry_rectangle(
+                                placed_polygons + [candidate_polygon]
+                            )
+                            if partial_rectangle is None:
                                 stats["geometry_rejections"] += 1
                                 continue
 
-                            partial_rectangle = minimum_area_rectangle(
-                                [
-                                    point
-                                    for polygon in list(world_polygons.values())
-                                    + [candidate_polygon]
-                                    for point in polygon
-                                ]
-                            )
-                            placed_area = prepared[moving_index]["area"] + sum(
-                                prepared[index]["area"] for index in poses
-                            )
+                            placed_area = current_placed_area + moving_area
                             empty_area_ratio = 0.0
-                            if partial_rectangle is not None:
-                                empty_area_ratio = max(
-                                    0.0,
-                                    partial_rectangle["area"] - placed_area,
-                                ) / total_piece_area
+                            empty_area_ratio = max(
+                                0.0,
+                                partial_rectangle["area"] - placed_area,
+                            ) / total_piece_area
 
                             # 等长接缝比任意局部接触包含更多约束信息。局部接触
                             # 仍保留给 T 形接缝，但在真正的整边匹配之后再尝试。
                             seam_error = (
-                                max(0.0, 1.0 - contact_ratio * 10.0)
-                                + length_error / max(fixed_length, moving_length) * 0.05
+                                1.0
+                                - contact_ratio
+                                + length_error / max(fixed_length, moving_length)
                             )
                             full_edge_match = length_error <= allowed_error
                             if full_edge_match:
@@ -807,6 +846,22 @@ def find_rectangle_solution(
                 -candidate[-3],
             )
         )
+        if len(candidates) > max_candidates_per_node:
+            kept_candidates = []
+            kept_partial = 0
+            for candidate in candidates:
+                if len(kept_candidates) >= max_candidates_per_node:
+                    break
+                if candidate[-2]:
+                    kept_candidates.append(candidate)
+                    continue
+                if kept_partial < max_partial_candidates_per_node:
+                    kept_candidates.append(candidate)
+                    kept_partial += 1
+            stats["candidate_pruned_by_limit"] += max(
+                0, len(candidates) - len(kept_candidates)
+            )
+            candidates = kept_candidates
         for candidate in candidates:
             (
                 moving_index,
@@ -826,304 +881,79 @@ def find_rectangle_solution(
             poses[moving_index] = (angle, center)
             world_polygons[moving_index] = candidate_polygon
 
-            solved = recurse(edge_error + normalized_edge_error)
+            stop_search = recurse(edge_error + normalized_edge_error)
 
             del world_polygons[moving_index]
             del poses[moving_index]
-            if solved:
+            if stop_search:
                 return True
         return False
 
     recurse(0.0)
+    stats["returned_complete_solutions"] = len(complete_solutions)
     if diagnostics is not None:
         diagnostics.clear()
         diagnostics.update(stats)
     if best_solution is None:
         return None
 
-    rectangle = best_solution["rectangle"]
-    rectangle, normalized_poses, normalized_world_polygons = _normalize_rectangle_pose(
-        rectangle,
-        best_solution["poses"],
-        best_solution["world_polygons"],
-    )
-    desired_center = target_center if target_center is not None else rectangle["center"]
-    shift = desired_center.sub(rectangle["center"])
-
-    placements = []
-    for piece in prepared:
-        angle, center = normalized_poses[piece["index"]]
-        shifted_center = center.add(shift)
-        placements.append(
-            {
-                "piece_index": piece["index"],
-                "source_center": piece["source_center"],
-                "target_center": shifted_center,
-                "offset": shifted_center.sub(piece["source_center"]),
-                "angle": _angle_wrap(angle),
-                "source_orientation": piece["source_orientation"],
-                "target_orientation": _angle_wrap(piece["source_orientation"] + angle),
-                "target_pts": [
-                    point.add(shift)
-                    for point in normalized_world_polygons[piece["index"]]
-                ],
-            }
+    def finalize_solution(solution_record: Dict) -> Dict:
+        rectangle = solution_record["rectangle"]
+        rectangle, normalized_poses, normalized_world_polygons = _normalize_rectangle_pose(
+            rectangle,
+            solution_record["poses"],
+            solution_record["world_polygons"],
         )
-
-    rectangle = dict(rectangle)
-    rectangle["center"] = desired_center
-    rectangle["corners"] = [corner.add(shift) for corner in rectangle["corners"]]
-    # Refine solution: slightly optimize piece positions
-    refined_poses = dict(normalized_poses)
-    refined_world = dict(normalized_world_polygons)
-    
-    for iteration in range(5):
-        placed_indices = list(refined_poses.keys())
-        for idx in placed_indices:
-            piece = prepared[idx]
-            local_pts = piece["local_points"]
-            old_angle, old_center = refined_poses[idx]
-            best_adj_score = float("inf")
-            best_adj = (old_angle, old_center)
-            # Try small perturbations
-            for da in [-0.06, -0.04, -0.02, -0.01, 0.0, 0.01, 0.02, 0.04, 0.06]:
-                for dx in [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0]:
-                    for dy in [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0]:
-                        new_angle = old_angle + da
-                        new_center = Pt(old_center.x + dx, old_center.y + dy)
-                        new_poly = transform_polygon(local_pts, new_angle, new_center)
-                        # Check overlap with other pieces
-                        overlap = False
-                        for oi, opoly in refined_world.items():
-                            if oi == idx: continue
-                            if polygons_overlap(new_poly, opoly, overlap_tolerance_mm):
-                                overlap = True
-                                break
-                        if overlap: continue
-                        all_polys = [refined_world[oi] for oi in refined_world if oi != idx] + [new_poly]
-                        all_pts = [pt for poly in all_polys for pt in poly]
-                        rect = minimum_area_rectangle(all_pts)
-                        if rect is None: continue
-                        if not _dimensions_valid(rect, size_range_mm, dimension_tolerance_mm): continue
-                        placed_area = sum(prepared[oi]["area"] for oi in refined_world if oi != idx) + piece["area"]
-                        a_err = abs(rect["area"] - placed_area) / rect["area"]
-                        if a_err > rectangle_area_tolerance: continue
-                        # Score = area fit + edge continuity
-                        adj_score = a_err * 3.0
-                        if adj_score < best_adj_score:
-                            best_adj_score = adj_score
-                            best_adj = (new_angle, new_center)
-            refined_poses[idx] = best_adj
-            refined_world[idx] = transform_polygon(local_pts, best_adj[0], best_adj[1])
-    
-    # Recalculate placements with refined positions (apply shift to world coords)
-    refined_placements = []
-    for piece in prepared:
-        angle, center = refined_poses[piece["index"]]
-        shifted_center = center.add(shift)
-        refined_placements.append({
-            "piece_index": piece["index"],
-            "source_center": piece["source_center"],
-            "target_center": shifted_center,
-            "offset": shifted_center.sub(piece["source_center"]),
-            "angle": _angle_wrap(angle),
-            "source_orientation": piece["source_orientation"],
-            "target_orientation": _angle_wrap(piece["source_orientation"] + angle),
-            "target_pts": [pt.add(shift) for pt in refined_world[piece["index"]]],
-        })
-    
-    return {
-        "placements": refined_placements,
-        "rectangle": rectangle,
-        "score": best_solution["score"],
-        "area_error": best_solution["area_error"],
-    }
-
-
-def solve_puzzle(
-    pieces: Sequence[Dict], target_center: Optional[Pt] = None, **kwargs
-) -> Optional[List[Dict]]:
-    """兼容性封装：仅返回每块碎片的目标位姿。"""
-
-    solution = find_rectangle_solution(pieces, target_center, **kwargs)
-    return None if solution is None else solution["placements"]
-
-
-# ---------------------------------------------------------------------------
-# 用于可重复测试的合成拼图生成器。
-# ---------------------------------------------------------------------------
-
-COLORS = [
-    "#e74c3c",
-    "#3498db",
-    "#2ecc71",
-    "#f39c12",
-    "#9b59b6",
-    "#1abc9c",
-    "#e67e22",
-    "#16a085",
-]
-
-
-def random_point_on_edge(start: Pt, end: Pt, margin: float = 0.18) -> Pt:
-    ratio = margin + random.random() * (1.0 - 2.0 * margin)
-    return start.lerp(end, ratio)
-
-
-def cut_polygon(
-    points: Sequence[Pt], first_cut: Pt, second_cut: Pt
-) -> Optional[Tuple[List[Pt], List[Pt]]]:
-    """沿两个边界点之间的线段切割凸多边形。"""
-
-    edge_count = len(points)
-    first_edge = -1
-    second_edge = -1
-    for index in range(edge_count):
-        start, end = _edge(points, index)
-        if point_on_segment(first_cut, start, end, 3.0):
-            first_edge = index
-        if point_on_segment(second_cut, start, end, 3.0):
-            second_edge = index
-    if first_edge < 0 or second_edge < 0 or first_edge == second_edge:
-        return None
-
-    first_polygon = [first_cut]
-    index = (first_edge + 1) % edge_count
-    while True:
-        first_polygon.append(points[index])
-        if index == second_edge:
-            break
-        index = (index + 1) % edge_count
-    first_polygon.append(second_cut)
-
-    second_polygon = [second_cut]
-    index = (second_edge + 1) % edge_count
-    while True:
-        second_polygon.append(points[index])
-        if index == first_edge:
-            break
-        index = (index + 1) % edge_count
-    second_polygon.append(first_cut)
-
-    try:
-        first_polygon = ensure_ccw(first_polygon)
-        second_polygon = ensure_ccw(second_polygon)
-    except ValueError:
-        return None
-    if len(first_polygon) > 5 or len(second_polygon) > 5:
-        return None
-    return first_polygon, second_polygon
-
-
-def generate_cut(piece: Dict, target_area: float) -> Optional[Dict]:
-    points = piece["pts"]
-    edge_count = len(points)
-    allow_adjacent = edge_count <= 4
-    attempts = []
-    for first_edge in range(edge_count):
-        for second_edge in range(edge_count):
-            if first_edge == second_edge:
-                continue
-            if not allow_adjacent and (
-                (first_edge + 1) % edge_count == second_edge
-                or (second_edge + 1) % edge_count == first_edge
-            ):
-                continue
-            for _ in range(4):
-                attempts.append(
-                    (
-                        random_point_on_edge(*_edge(points, first_edge)),
-                        random_point_on_edge(*_edge(points, second_edge)),
-                    )
-                )
-    random.shuffle(attempts)
-    for first_cut, second_cut in attempts:
-        result = cut_polygon(points, first_cut, second_cut)
-        if result is None:
-            continue
-        first_area = polygon_area(result[0])
-        second_area = polygon_area(result[1])
-        if first_area > target_area * 0.1 and second_area > target_area * 0.1:
-            return {"result": result, "p1": first_cut, "p2": second_cut}
-    return None
-
-
-def generate_puzzle(cx: float, cy: float, width: float, height: float) -> Dict:
-    """生成由 2～4 块碎片组成的矩形拼图，供求解器测试使用。"""
-
-    piece_count = random.randint(2, 4)
-    half_width = width * 0.5
-    half_height = height * 0.5
-    rectangle = ensure_ccw(
-        [
-            Pt(cx - half_width, cy - half_height),
-            Pt(cx + half_width, cy - half_height),
-            Pt(cx + half_width, cy + half_height),
-            Pt(cx - half_width, cy + half_height),
-        ]
-    )
-    target_area = width * height
-    pieces = [{"pts": list(rectangle)}]
-    cut_lines = []
-
-    for _ in range(piece_count - 1):
-        candidates = sorted(
-            range(len(pieces)),
-            key=lambda index: polygon_area(pieces[index]["pts"]),
-            reverse=True,
+        desired_center = (
+            target_center if target_center is not None else rectangle["center"]
         )
-        cut = None
-        cut_index = -1
-        for candidate_index in candidates:
-            cut = generate_cut(pieces[candidate_index], target_area)
-            if cut is not None:
-                cut_index = candidate_index
-                break
-        if cut is None:
-            break
-        pieces[cut_index : cut_index + 1] = [
-            {"pts": cut["result"][0]},
-            {"pts": cut["result"][1]},
-        ]
-        cut_lines.append({"p1": cut["p1"], "p2": cut["p2"]})
+        shift = desired_center.sub(rectangle["center"])
 
-    for index, piece in enumerate(pieces):
-        piece["c"] = COLORS[index % len(COLORS)]
+        placements = []
+        for piece in prepared:
+            angle, center = normalized_poses[piece["index"]]
+            shifted_center = center.add(shift)
+            placements.append(
+                {
+                    "piece_index": piece["index"],
+                    "source_center": piece["source_center"],
+                    "target_center": shifted_center,
+                    "offset": shifted_center.sub(piece["source_center"]),
+                    "angle": _angle_wrap(angle),
+                    "source_orientation": piece["source_orientation"],
+                    "target_orientation": _angle_wrap(
+                        piece["source_orientation"] + angle
+                    ),
+                    "target_pts": [
+                        point.add(shift)
+                        for point in normalized_world_polygons[piece["index"]]
+                    ],
+                }
+            )
 
-    return {
-        "targetPts": rectangle,
-        "pieces": pieces,
-        "targetCenter": Pt(cx, cy),
-        "cutLines": cut_lines,
-    }
+        rectangle = dict(rectangle)
+        rectangle["center"] = desired_center
+        rectangle["corners"] = [corner.add(shift) for corner in rectangle["corners"]]
+        return {
+            "placements": placements,
+            "rectangle": rectangle,
+            "score": solution_record["score"],
+            "area_error": solution_record["area_error"],
+            "poses": normalized_poses,
+            "world_polygons": {
+                index: [point.add(shift) for point in polygon]
+                for index, polygon in normalized_world_polygons.items()
+            },
+        }
 
-
-def scatter_pieces(pieces: Sequence[Dict], distance: float = 180.0) -> List[Dict]:
-    """为测试生成各自经过平移和旋转的碎片观测结果。"""
-
-    scattered = []
-    for index, piece in enumerate(pieces):
-        points = ensure_ccw(piece["pts"])
-        center = polygon_centroid(points)
-        local_points = [point.sub(center) for point in points]
-        angle = random.uniform(-math.pi, math.pi)
-        direction = 2.0 * math.pi * index / len(pieces) + random.uniform(-0.2, 0.2)
-        observed_center = Pt(
-            math.cos(direction) * distance,
-            math.sin(direction) * distance,
-        )
-        scattered.append(
-            {
-                "pts": transform_polygon(local_points, angle, observed_center),
-                "source_index": index,
-            }
-        )
-    random.shuffle(scattered)
-    return scattered
+    finalized_candidates = [finalize_solution(solution) for solution in complete_solutions]
+    result = finalize_solution(best_solution)
+    result["geometry_candidates"] = finalized_candidates
+    return result
 
 
 class TextureScorer:
-    """çº¹ç†è¿žç»­æ€§è¯„åˆ†å™¨ (v3)."""
+    """纹理连续性评分器。"""
 
     def __init__(self, mm_per_px=10.0, strip_width_mm=5.0,
                  lambda_texture=0.5, gw=0.35, nw=0.30, ow=0.35, pw=0.45,
@@ -1146,7 +976,7 @@ class TextureScorer:
         if not seams:
             fb = self._full_rect(canvas, masks, pattern_layers)
             return self._asm(fb, [], True, False)
-        ss = []; gs = ns = os_ = ps = 0.0; fb_flag = False; total_weight = 0.0
+        ss = []; gs = ns = os_ = ps = is_ = 0.0; fb_flag = False; total_weight = 0.0
         for s in seams:
             sc = self._score_seam(canvas, pattern_layers, s)
             ss.append(sc)
@@ -1157,10 +987,17 @@ class TextureScorer:
             ns += sc["n"] * weight
             os_ += sc["o"] * weight
             ps += sc["p"] * weight
+            is_ += sc.get("i", 0.5) * weight
         if total_weight <= 1e-6:
             total_weight = float(max(1, len(ss)))
         return self._asm(
-            {"g": gs/total_weight, "n": ns/total_weight, "o": os_/total_weight, "p": ps/total_weight},
+            {
+                "g": gs/total_weight,
+                "n": ns/total_weight,
+                "o": os_/total_weight,
+                "p": ps/total_weight,
+                "i": is_/total_weight,
+            },
             ss, False, fb_flag)
 
     def total_score(self, shape_score: float, tex: Dict) -> float:
@@ -1289,8 +1126,94 @@ class TextureScorer:
                 if cv2.countNonZero(reg) < 5: continue
                 ei = cv2.morphologyEx(mi, cv2.MORPH_GRADIENT, k)
                 ej = cv2.morphologyEx(mj, cv2.MORPH_GRADIENT, k)
-                seams.append({"i":pi,"j":pj,"mi":mi,"mj":mj,"r":reg,"e":cv2.bitwise_and(ei,ej)})
+                gap_band = cv2.bitwise_and(
+                    reg,
+                    cv2.bitwise_not(cv2.bitwise_or(mi, mj)),
+                )
+                if cv2.countNonZero(gap_band) < 5:
+                    gap_band = reg
+                edge_support = cv2.bitwise_and(
+                    cv2.dilate(ei, k, iterations=max(1, self.strip_r // 2)),
+                    cv2.dilate(ej, k, iterations=max(1, self.strip_r // 2)),
+                )
+                sample_band = cv2.bitwise_or(gap_band, edge_support)
+                seams.append(
+                    {
+                        "i":pi,
+                        "j":pj,
+                        "mi":mi,
+                        "mj":mj,
+                        "r":reg,
+                        "probe":gap_band,
+                        "sample":sample_band,
+                    }
+                )
         return seams
+
+    def _extract_ink_mask_from_canvas(self, canvas):
+        if canvas.ndim == 2:
+            gray = canvas
+            saturation = np.zeros_like(gray, dtype=np.uint8)
+            max_delta_from_white = (255 - gray).astype(np.uint8)
+        else:
+            hsv = cv2.cvtColor(canvas, cv2.COLOR_BGR2HSV)
+            gray = cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY)
+            saturation = hsv[:, :, 1].astype(np.uint8)
+            max_delta_from_white = np.max(
+                255 - canvas.astype(np.int16),
+                axis=2,
+            ).astype(np.uint8)
+
+        ink_mask = (
+            (
+                (max_delta_from_white >= 24)
+                | (saturation >= 30)
+                | (gray <= 205)
+            ).astype(np.uint8)
+            * 255
+        )
+        return cv2.morphologyEx(
+            ink_mask,
+            cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        )
+
+    def _build_informative_sample_mask(self, canvas, pattern_layers, si, sj, base_mask):
+        if cv2.countNonZero(base_mask) < 5:
+            return base_mask
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        informative = np.zeros_like(base_mask, dtype=np.uint8)
+
+        if pattern_layers:
+            red = pattern_layers.get("red")
+            black = pattern_layers.get("black")
+            if red is not None and black is not None:
+                pattern_union = cv2.bitwise_or(red, black)
+                pattern_near = cv2.dilate(
+                    cv2.bitwise_and(pattern_union, cv2.bitwise_or(si, sj)),
+                    kernel,
+                    iterations=1,
+                )
+                informative = cv2.bitwise_or(
+                    informative,
+                    cv2.bitwise_and(base_mask, pattern_near),
+                )
+
+        ink_mask = self._extract_ink_mask_from_canvas(canvas)
+        ink_near = cv2.dilate(
+            cv2.bitwise_and(ink_mask, cv2.bitwise_or(si, sj)),
+            kernel,
+            iterations=1,
+        )
+        informative = cv2.bitwise_or(
+            informative,
+            cv2.bitwise_and(base_mask, ink_near),
+        )
+
+        if cv2.countNonZero(informative) < max(8, cv2.countNonZero(base_mask) // 12):
+            return base_mask
+        return informative
 
     def _color_gradient_mag(self, canvas):
         if canvas.ndim==2 or canvas.shape[2]==1:
@@ -1305,31 +1228,52 @@ class TextureScorer:
         return np.max(np.sqrt(gx**2+gy**2), axis=2)
 
     def _score_seam(self, canvas, pattern_layers, s):
-        r = self.strip_r; mi,mj = s["mi"],s["mj"]; reg,edg = s["r"],s["e"]
+        r = self.strip_r; mi,mj = s["mi"],s["mj"]; reg = s["r"]
+        probe = s.get("probe", reg)
+        sample_band = s.get("sample", probe)
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3))
         di = cv2.dilate(mi,k,iterations=r); dj = cv2.dilate(mj,k,iterations=r)
-        si = cv2.bitwise_and(cv2.bitwise_and(di,cv2.bitwise_not(mj)), reg)
-        sj = cv2.bitwise_and(cv2.bitwise_and(dj,cv2.bitwise_not(mi)), reg)
+        si = cv2.bitwise_and(cv2.bitwise_and(di,cv2.bitwise_not(mj)), probe)
+        sj = cv2.bitwise_and(cv2.bitwise_and(dj,cv2.bitwise_not(mi)), probe)
+        if np.sum(si>0)<10 or np.sum(sj>0)<10:
+            si = cv2.bitwise_and(cv2.bitwise_and(di,cv2.bitwise_not(mj)), reg)
+            sj = cv2.bitwise_and(cv2.bitwise_and(dj,cv2.bitwise_not(mi)), reg)
         if np.sum(si>0)<10 or np.sum(sj>0)<10:
             fb = self._full_rect(canvas, {0: cv2.bitwise_or(mi,mj)}, pattern_layers)
-            return {"g":fb["g"],"n":fb["n"],"o":fb["o"],"p":fb["p"],"fb":True,"weight":1.0}
+            return {"g":fb["g"],"n":fb["n"],"o":fb["o"],"p":fb["p"],"i":fb.get("i", 0.5),"fb":True,"weight":1.0}
+        sample_mask = self._build_informative_sample_mask(
+            canvas,
+            pattern_layers,
+            si,
+            sj,
+            sample_band,
+        )
         # Gradient
         gm = self._color_gradient_mag(canvas)
-        sg = np.median(gm[reg>0]) if np.sum(reg>0)>0 else 0.0
+        sg = np.median(gm[sample_mask>0]) if np.sum(sample_mask>0)>0 else 0.0
         er = cv2.erode(mi,k,iterations=r*2)
         inner = cv2.bitwise_and(mi,cv2.bitwise_not(er))
         ig_ = np.median(gm[inner>0]) if np.sum(inner>0)>0 else 1.0
         grad_s = min(sg/max(ig_,1.0),2.0)/2.0
-        ncc_s = self._ncc_along_edge(canvas, si, sj, edg, r)
+        ncc_s = self._ncc_along_edge(canvas, si, sj, sample_mask, r)
         orb_s = self._orb(canvas, si, sj)
-        pattern_s, pattern_strength = self._pattern_consistency(pattern_layers, si, sj, edg, r)
-        seam_pixels = float(max(cv2.countNonZero(edg), cv2.countNonZero(reg)))
-        texture_energy = float(np.median(gm[cv2.bitwise_or(si, sj) > 0])) if np.any(cv2.bitwise_or(si, sj) > 0) else 0.0
-        weight = max(1.0, seam_pixels) * (0.25 + min(texture_energy / 24.0, 1.0) + 0.8 * pattern_strength)
+        pattern_s, pattern_strength = self._pattern_consistency(pattern_layers, si, sj, sample_mask, r)
+        ink_s, ink_strength = self._ink_consistency(canvas, si, sj, sample_mask, r)
+        info_strength = 0.65 * pattern_strength + 0.35 * ink_strength
+        info_factor = 0.25 + 0.75 * info_strength
+        ncc_s = 0.5 + (ncc_s - 0.5) * info_factor
+        orb_s = 0.5 + (orb_s - 0.5) * info_factor
+        pattern_s = 0.80 * pattern_s + 0.20 * ink_s
+        seam_pixels = float(max(cv2.countNonZero(sample_mask), cv2.countNonZero(probe)))
+        texture_energy = float(np.median(gm[sample_mask > 0])) if np.any(sample_mask > 0) else 0.0
+        weight = max(1.0, seam_pixels) * (0.15 + min(texture_energy / 28.0, 1.0) + 1.0 * info_strength)
         return {
             "g":float(grad_s),"n":float(ncc_s),"o":float(orb_s),"p":float(pattern_s),
+            "i":float(ink_s),
             "fb":False,"weight":float(weight),
             "pattern_strength":float(pattern_strength),
+            "ink_strength":float(ink_strength),
+            "sample_pixels": float(cv2.countNonZero(sample_mask)),
         }
 
     def _pattern_consistency(self, pattern_layers, si, sj, edge, r):
@@ -1385,8 +1329,78 @@ class TextureScorer:
         scores_np = np.asarray(scores, dtype=np.float32)
         return float(np.average(scores_np, weights=weights_np)), float(np.mean(weights_np))
 
+    def _ink_consistency(self, canvas, si, sj, edge, r):
+        ink_mask = self._extract_ink_mask_from_canvas(canvas)
+
+        ys, xs = np.where(edge > 0)
+        if len(xs) < 5:
+            return 0.5, 0.0
+
+        count = min(20, len(xs))
+        idx = np.linspace(0, len(xs) - 1, count, dtype=int)
+        radius = min(r, 5)
+        scores = []
+        weights = []
+        for sample_index in idx:
+            cx, cy = int(xs[sample_index]), int(ys[sample_index])
+            y0 = max(0, cy - radius); y1 = cy + radius + 1
+            x0 = max(0, cx - radius); x1 = cx + radius + 1
+            local_i = si[y0:y1, x0:x1] > 0
+            local_j = sj[y0:y1, x0:x1] > 0
+            if local_i.sum() < 3 or local_j.sum() < 3:
+                continue
+
+            local_ink = ink_mask[y0:y1, x0:x1] > 0
+            ink_i_mask = np.logical_and(local_ink, local_i)
+            ink_j_mask = np.logical_and(local_ink, local_j)
+            ink_i = float(np.mean(ink_i_mask)) if local_i.any() else 0.0
+            ink_j = float(np.mean(ink_j_mask)) if local_j.any() else 0.0
+            combined_info = max(ink_i, ink_j)
+            paired_info = min(ink_i, ink_j)
+
+            if combined_info < 0.04:
+                scores.append(0.5)
+                weights.append(0.05)
+                continue
+
+            if paired_info < 0.015:
+                scores.append(0.12)
+                weights.append(float(combined_info))
+                continue
+
+            ink_i_u8 = (ink_i_mask.astype(np.uint8) * 255)
+            ink_j_u8 = (ink_j_mask.astype(np.uint8) * 255)
+            bridge_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            contact_overlap = cv2.bitwise_and(
+                cv2.dilate(ink_i_u8, bridge_kernel, iterations=1),
+                cv2.dilate(ink_j_u8, bridge_kernel, iterations=1),
+            )
+            contact_score = min(
+                1.0,
+                cv2.countNonZero(contact_overlap) / max(4.0, 0.5 * (cv2.countNonZero(ink_i_u8) + cv2.countNonZero(ink_j_u8))),
+            )
+
+            j_inv = np.where(ink_j_mask, 0, 255).astype(np.uint8)
+            i_inv = np.where(ink_i_mask, 0, 255).astype(np.uint8)
+            dist_to_j = cv2.distanceTransform(j_inv, cv2.DIST_L2, 3)
+            dist_to_i = cv2.distanceTransform(i_inv, cv2.DIST_L2, 3)
+            mean_ij = float(np.mean(dist_to_j[ink_i_mask])) if np.any(ink_i_mask) else 4.0
+            mean_ji = float(np.mean(dist_to_i[ink_j_mask])) if np.any(ink_j_mask) else 4.0
+            distance_score = math.exp(-(mean_ij + mean_ji) * 0.5 / 1.6)
+
+            density_balance = max(0.0, 1.0 - abs(ink_i - ink_j) / max(combined_info, 1e-6))
+            local_score = 0.45 * contact_score + 0.40 * distance_score + 0.15 * density_balance
+            scores.append(float(local_score))
+            weights.append(float(0.5 * combined_info + 0.5 * paired_info))
+
+        if not scores:
+            return 0.5, 0.0
+        weights_np = np.asarray(weights, dtype=np.float32)
+        scores_np = np.asarray(scores, dtype=np.float32)
+        return float(np.average(scores_np, weights=weights_np)), float(np.mean(weights_np))
+
     def _ncc_along_edge(self, canvas, si, sj, edge, r):
-        """æ²¿æŽ¥ç¼çº¿é€ç‚¹ NCCï¼ˆå‘é‡åŒ–ï¼Œæ—  Python å¾ªçŽ¯ï¼‰ã€‚"""
+        """沿接缝逐点计算 NCC 相似度。"""
         gray = cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY) if canvas.ndim==3 else canvas
         ys, xs = np.where(edge > 0)
         if len(xs) < 5: return 0.5
@@ -1420,7 +1434,7 @@ class TextureScorer:
         gray = cv2.cvtColor(canvas,cv2.COLOR_BGR2GRAY) if canvas.ndim==3 else canvas
         c = np.zeros_like(gray, dtype=np.uint8)
         for m in masks.values(): c = cv2.bitwise_or(c,m)
-        if np.sum(c>0) < 50: return {"g":0.5,"n":0.5,"o":0.5,"p":0.5}
+        if np.sum(c>0) < 50: return {"g":0.5,"n":0.5,"o":0.5,"p":0.5,"i":0.5}
         gm = self._color_gradient_mag(canvas)
         rg = gm[c>0]
         if len(rg)>0:
@@ -1432,6 +1446,7 @@ class TextureScorer:
         kp,de = orb.detectAndCompute(roi,None)
         orb_s = min(len(kp)/50.0,1.0) if (de is not None and len(kp)>=4) else 0.3
         pattern_score = 0.5
+        ink_score = 0.5
         if pattern_layers:
             red = pattern_layers.get("red")
             black = pattern_layers.get("black")
@@ -1439,30 +1454,40 @@ class TextureScorer:
                 red_density = float(np.mean(red[c > 0] > 0))
                 black_density = float(np.mean(black[c > 0] > 0))
                 pattern_score = 0.5 + min(0.25, 0.8 * max(red_density, black_density))
-        return {"g":float(grad),"n":0.5,"o":float(orb_s),"p":float(pattern_score)}
+        if canvas.ndim == 3 and np.sum(c > 0) > 0:
+            saturation = cv2.cvtColor(canvas, cv2.COLOR_BGR2HSV)[:, :, 1]
+            max_delta_from_white = np.max(255 - canvas.astype(np.int16), axis=2)
+            ink_density = float(
+                np.mean(
+                    (
+                        (max_delta_from_white[c > 0] >= 24)
+                        | (saturation[c > 0] >= 30)
+                        | (gray[c > 0] <= 205)
+                    )
+                )
+            )
+            ink_score = 0.5 + min(0.25, 0.7 * ink_density)
+        return {"g":float(grad),"n":0.5,"o":float(orb_s),"p":float(pattern_score),"i":float(ink_score)}
 
     def _asm(self, sc, ss, ff, fs):
         g,n,o,p = sc["g"],sc["n"],sc["o"],sc.get("p", 0.5)
-        tex = self.w_g*(1.0-g) + self.w_n*n + self.w_o*o + self.w_p*p
+        ink = sc.get("i", 0.5)
+        texture_core = self.w_g*(1.0-g) + self.w_n*n + self.w_o*o + self.w_p*p
+        tex = 0.85 * texture_core + 0.15 * ink
         if ff:
             tex -= self.full_rect_penalty
         if fs:
             tex -= self.sparse_seam_penalty
         return {"texture_score":float(max(0.0,min(1.0,tex))),
                 "gradient_discontinuity":float(g),"ncc_similarity":float(n),
-                "orb_consistency":float(o),"pattern_consistency":float(p),"seam_scores":ss,
+                "orb_consistency":float(o),"pattern_consistency":float(p),"ink_consistency":float(ink),"seam_scores":ss,
                 "fallback_full_rect":ff,"fallback_sparse_seam":fs}
 
     def _def(self, reason):
         return {"texture_score":0.5,"gradient_discontinuity":0.0,
-                "ncc_similarity":0.0,"orb_consistency":0.0,"pattern_consistency":0.0,
+                "ncc_similarity":0.0,"orb_consistency":0.0,"pattern_consistency":0.0,"ink_consistency":0.0,
                 "seam_scores":[],"fallback_full_rect":False,
                 "fallback_sparse_seam":False,"error":reason}
-
-
-if __name__ == "__main__":
-    print("TextureScorer v3 loaded. OpenCV", cv2.__version__)
-
 
 # ---- Public API: joint solver ----
 
@@ -1490,17 +1515,21 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
         if isinstance(p, Pt): return p
         return Pt(p[0], p[1])
 
-    # Step 1: Find geometric solution
+    # Step 1: Find geometric solution(s)
     sol = find_rectangle_solution(
         pieces_geometry, target_center, **geometry_kwargs)
     if sol is None:
         return {"error": "no geometric solution"}
 
-    candidates = [sol]
+    candidates = list(sol.get("geometry_candidates", []))
+    if not candidates:
+        candidates = [sol]
+    candidates = candidates[: max(1, top_k)]
 
-    # Step 2: Generate perturbed alternatives for top-K
-    if top_k > 1 and 'poses' in sol and 'world_polygons' in sol:
-        base_poses = sol['poses']
+    # Step 2: Generate perturbed alternatives to fill the remaining slots
+    base_solution = candidates[0]
+    if top_k > len(candidates) and 'poses' in base_solution and 'world_polygons' in base_solution:
+        base_poses = base_solution['poses']
         # Build local_points for each piece
         local_pts = {}
         for pi, p in enumerate(pieces_geometry):
@@ -1517,7 +1546,7 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
             (+angle_perturb_rad * 0.6, +translate_perturb_mm * 0.6, -translate_perturb_mm * 0.6),
             (-angle_perturb_rad * 0.6, -translate_perturb_mm * 0.6, +translate_perturb_mm * 0.6),
         ]
-        for attempt in range(max(0, top_k - 1)):
+        for attempt in range(max(0, top_k - len(candidates))):
             da, dx, dy = perturb_patterns[attempt % len(perturb_patterns)]
             perturbed_poses = {}
             perturbed_world = {}
@@ -1533,12 +1562,12 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
                     lp = [pt.sub(ct) for pt in pieces_geometry[pi]['pts']]
                     local_pts[pi] = lp
                 perturbed_world[pi] = [pt.rotate(angle + da * scale).add(new_center) for pt in lp]
-            alt = dict(sol)
+            alt = dict(base_solution)
             alt['poses'] = perturbed_poses
             alt['world_polygons'] = perturbed_world
-            alt['score'] = sol['score'] + 0.05
+            alt['score'] = base_solution['score'] + 0.05
             # Copy placements with updated positions
-            alt_placements = copy.deepcopy(sol.get('placements', []))
+            alt_placements = copy.deepcopy(base_solution.get('placements', []))
             for pl in alt_placements:
                 pi = pl.get('piece_index', 0)
                 if pi in perturbed_poses:

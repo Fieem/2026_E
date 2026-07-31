@@ -119,9 +119,11 @@ python visual_demo.py --seed 29 --noise 1.0 --output rectangle_demo.png
 
 模板文件默认放在 [templates/jqk](templates/jqk/README.md) 中，命名格式为：
 
-- `spade_J.png`
-- `heart_Q.png`
-- `club_K.png`
+- `spade_J.jpg`
+- `heart_Q.jpg`
+- `club_K.jpg`
+
+当前代码默认按 `.jpg` 查找，也兼容同名的 `.jpeg` 和 `.png`。
 
 这条链路当前只用于“在多个几何候选里选出更像 J/Q/K 的拼法”，不会额外输出
 具体是哪一张牌。
