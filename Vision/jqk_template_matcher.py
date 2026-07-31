@@ -27,6 +27,7 @@ class TemplateFeature:
     red_mask: np.ndarray
     black_mask: np.ndarray
     ink_mask: np.ndarray
+    white_mask: np.ndarray
     edge_mask: np.ndarray
 
 
@@ -36,6 +37,7 @@ class CardFeature:
     red_mask: np.ndarray
     black_mask: np.ndarray
     ink_mask: np.ndarray
+    white_mask: np.ndarray
     edge_mask: np.ndarray
 
 
@@ -149,6 +151,16 @@ def _extract_card_feature(
     red_mask = _clean_mask(red_mask, 3, 3)
     black_mask = _clean_mask(black_mask, 3, 3)
     ink_mask = _clean_mask(ink_mask, 3, 3)
+    white_mask = (
+        (
+            (ink_mask == 0)
+            & (value >= 118)
+            & (gray >= 122)
+            & (max_delta_from_white <= 165)
+        ).astype(np.uint8)
+        * 255
+    )
+    white_mask = _clean_mask(white_mask, 3, 5)
 
     edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 140)
     edges = cv2.bitwise_and(edges, ink_mask)
@@ -158,6 +170,7 @@ def _extract_card_feature(
         red_mask=red_mask,
         black_mask=black_mask,
         ink_mask=ink_mask,
+        white_mask=white_mask,
         edge_mask=edges,
     )
 
@@ -188,6 +201,7 @@ def _load_template_bank_cached(
                 red_mask=card.red_mask,
                 black_mask=card.black_mask,
                 ink_mask=card.ink_mask,
+                white_mask=card.white_mask,
                 edge_mask=card.edge_mask,
             )
         )
@@ -251,10 +265,10 @@ def _roi_masks(
         width - corner_margin_x - corner_width:width - corner_margin_x,
     ] = 255
 
-    portrait_width = int(round(width * 0.42))
-    portrait_height = int(round(height * 0.50))
+    portrait_width = int(round(width * 0.34))
+    portrait_height = int(round(height * 0.44))
     portrait_x0 = (width - portrait_width) // 2
-    portrait_y0 = int(round(height * 0.24))
+    portrait_y0 = int(round(height * 0.27))
     portrait_mask[
         portrait_y0:portrait_y0 + portrait_height,
         portrait_x0:portrait_x0 + portrait_width,
@@ -296,48 +310,36 @@ def _make_rect_mask(
 @lru_cache(maxsize=16)
 def _detail_roi_masks(
     width: int, height: int
-) -> Tuple[Tuple[np.ndarray, ...], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    portrait_width = int(round(width * 0.42))
-    portrait_height = int(round(height * 0.50))
+) -> Tuple[Tuple[np.ndarray, ...], np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    portrait_width = int(round(width * 0.34))
+    portrait_height = int(round(height * 0.44))
     portrait_x0 = (width - portrait_width) // 2
-    portrait_y0 = int(round(height * 0.24))
+    portrait_y0 = int(round(height * 0.27))
     portrait_x1 = portrait_x0 + portrait_width
     portrait_y1 = portrait_y0 + portrait_height
 
-    portrait_blocks = (
-        _make_rect_mask(
-            width,
-            height,
-            portrait_x0,
-            portrait_y0,
-            portrait_x0 + portrait_width // 2,
-            portrait_y0 + portrait_height // 2,
-        ),
-        _make_rect_mask(
-            width,
-            height,
-            portrait_x0 + portrait_width // 2,
-            portrait_y0,
-            portrait_x1,
-            portrait_y0 + portrait_height // 2,
-        ),
-        _make_rect_mask(
-            width,
-            height,
-            portrait_x0,
-            portrait_y0 + portrait_height // 2,
-            portrait_x0 + portrait_width // 2,
-            portrait_y1,
-        ),
-        _make_rect_mask(
-            width,
-            height,
-            portrait_x0 + portrait_width // 2,
-            portrait_y0 + portrait_height // 2,
-            portrait_x1,
-            portrait_y1,
-        ),
-    )
+    portrait_blocks_list = []
+    x_cuts = [portrait_x0]
+    y_cuts = [portrait_y0]
+    for index in range(1, 3):
+        x_cuts.append(portrait_x0 + (portrait_width * index) // 3)
+        y_cuts.append(portrait_y0 + (portrait_height * index) // 3)
+    x_cuts.append(portrait_x1)
+    y_cuts.append(portrait_y1)
+
+    for row in range(3):
+        for col in range(3):
+            portrait_blocks_list.append(
+                _make_rect_mask(
+                    width,
+                    height,
+                    x_cuts[col],
+                    y_cuts[row],
+                    x_cuts[col + 1],
+                    y_cuts[row + 1],
+                )
+            )
+    portrait_blocks = tuple(portrait_blocks_list)
 
     rank_width = int(round(width * 0.18))
     rank_height = int(round(height * 0.18))
@@ -403,7 +405,28 @@ def _detail_roi_masks(
         int(round(width * 0.78)),
         int(round(height * 0.95)),
     )
-    return portrait_blocks, letter_mask, suit_mask, top_band, bottom_band
+    outer_margin_x = max(1, int(round(width * 0.015)))
+    outer_margin_y = max(1, int(round(height * 0.015)))
+    inner_margin_x = max(outer_margin_x + 2, 43)
+    inner_margin_y = max(outer_margin_y + 2, 35)
+    outer_band = _make_rect_mask(
+        width,
+        height,
+        outer_margin_x,
+        outer_margin_y,
+        width - outer_margin_x,
+        height - outer_margin_y,
+    )
+    inner_cut = _make_rect_mask(
+        width,
+        height,
+        inner_margin_x,
+        inner_margin_y,
+        width - inner_margin_x,
+        height - inner_margin_y,
+    )
+    border_band = cv2.bitwise_and(outer_band, cv2.bitwise_not(inner_cut))
+    return portrait_blocks, letter_mask, suit_mask, top_band, bottom_band, border_band
 
 
 def _mean_mask_f1_score(
@@ -482,6 +505,7 @@ def _rotate_card_feature(card: CardFeature, orientation_deg: int) -> CardFeature
             red_mask=cv2.rotate(card.red_mask, cv2.ROTATE_180),
             black_mask=cv2.rotate(card.black_mask, cv2.ROTATE_180),
             ink_mask=cv2.rotate(card.ink_mask, cv2.ROTATE_180),
+            white_mask=cv2.rotate(card.white_mask, cv2.ROTATE_180),
             edge_mask=cv2.rotate(card.edge_mask, cv2.ROTATE_180),
         )
     raise ValueError("第一阶段只支持 0° 和 180° 模板方向")
@@ -528,9 +552,10 @@ def match_card_to_templates(
     center_roi, corner_roi, portrait_roi, rank_roi = _roi_masks(
         canvas_width_px, canvas_height_px
     )
-    portrait_blocks, letter_roi, suit_roi, top_band_roi, bottom_band_roi = _detail_roi_masks(
+    portrait_blocks, letter_roi, suit_roi, top_band_roi, bottom_band_roi, border_band_roi = _detail_roi_masks(
         canvas_width_px, canvas_height_px
     )
+    border_eval_roi = cv2.bitwise_and(border_band_roi, cv2.bitwise_not(corner_roi))
 
     all_scores: List[Dict] = []
     best_payload: Dict | None = None
@@ -574,15 +599,20 @@ def match_card_to_templates(
                 template.ink_mask,
                 bottom_band_roi,
             )
-            center_score = (
-                0.15 * center_ink
-                + 0.13 * center_edge
-                + 0.12 * portrait_ink
-                + 0.12 * portrait_edge
-                + 0.11 * portrait_block_ink
-                + 0.11 * portrait_block_edge
+            border_black = _mask_f1_score(
+                oriented_card.black_mask,
+                template.black_mask,
+                border_eval_roi,
             )
-            center_score += 0.04 * top_band_ink + 0.04 * bottom_band_ink
+            center_score = (
+                0.06 * center_ink
+                + 0.08 * center_edge
+                + 0.08 * portrait_ink
+                + 0.18 * portrait_edge
+                + 0.12 * portrait_block_ink
+                + 0.26 * portrait_block_edge
+            )
+            center_score += 0.02 * top_band_ink + 0.02 * bottom_band_ink
 
             corner_ink = _mask_f1_score(oriented_card.ink_mask, template.ink_mask, corner_roi)
             corner_edge = _edge_distance_score(
@@ -631,6 +661,7 @@ def match_card_to_templates(
                 + 0.10 * letter_edge
                 + 0.05 * suit_ink
                 + 0.05 * suit_edge
+                + 0.50 * border_black
             )
 
             red_score = _mask_f1_score(oriented_card.red_mask, template.red_mask)
@@ -654,6 +685,8 @@ def match_card_to_templates(
                 "portrait_block_edge_score": float(portrait_block_edge),
                 "top_band_ink_score": float(top_band_ink),
                 "bottom_band_ink_score": float(bottom_band_ink),
+                "border_white_score": float(border_black),
+                "border_black_score": float(border_black),
                 "rank_red_score": float(rank_red),
                 "rank_black_score": float(rank_black),
                 "rank_edge_score": float(rank_edge),
@@ -692,6 +725,7 @@ def match_card_to_templates(
         "portrait_block_edge_score": float(best_payload["portrait_block_edge_score"]),
         "top_band_ink_score": float(best_payload["top_band_ink_score"]),
         "bottom_band_ink_score": float(best_payload["bottom_band_ink_score"]),
+        "border_white_score": float(best_payload["border_white_score"]),
         "rank_red_score": float(best_payload["rank_red_score"]),
         "rank_black_score": float(best_payload["rank_black_score"]),
         "rank_edge_score": float(best_payload["rank_edge_score"]),

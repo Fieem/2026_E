@@ -332,6 +332,69 @@ def _angle_wrap(angle: float) -> float:
     return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
+def _solution_angle_signature(solution: Dict) -> Tuple[Tuple[int, float], ...]:
+    placements = solution.get("placements", [])
+    signature: List[Tuple[int, float]] = []
+    for placement in placements:
+        if not isinstance(placement, dict):
+            continue
+        signature.append(
+            (
+                int(placement.get("piece_index", 0)),
+                _angle_wrap(float(placement.get("angle", 0.0))),
+            )
+        )
+    signature.sort(key=lambda item: item[0])
+    return tuple(signature)
+
+
+def _solution_angle_distance(first: Dict, second: Dict) -> float:
+    first_signature = dict(_solution_angle_signature(first))
+    second_signature = dict(_solution_angle_signature(second))
+    common_keys = sorted(set(first_signature.keys()) & set(second_signature.keys()))
+    if not common_keys:
+        return 0.0
+    distances = [
+        abs(_angle_wrap(first_signature[key] - second_signature[key]))
+        for key in common_keys
+    ]
+    return max(distances) if distances else 0.0
+
+
+def _select_diverse_geometry_candidates(
+    candidates: Sequence[Dict],
+    limit: int,
+    min_angle_diff_rad: float,
+) -> List[Dict]:
+    if limit <= 0:
+        return []
+    ordered = sorted(candidates, key=lambda item: float(item.get("score", 0.0)))
+    if not ordered:
+        return []
+    if min_angle_diff_rad <= 1e-6:
+        return ordered[:limit]
+
+    selected: List[Dict] = [ordered[0]]
+    remaining = ordered[1:]
+    for candidate in remaining:
+        if len(selected) >= limit:
+            break
+        if all(
+            _solution_angle_distance(candidate, existing) >= min_angle_diff_rad
+            for existing in selected
+        ):
+            selected.append(candidate)
+
+    if len(selected) < limit:
+        for candidate in remaining:
+            if len(selected) >= limit:
+                break
+            if candidate in selected:
+                continue
+            selected.append(candidate)
+    return selected
+
+
 def polygon_orientation(points: Sequence[Pt]) -> float:
     """用最小面积外接矩形的主边估计碎片方向，结果单位为弧度。"""
 
@@ -411,6 +474,7 @@ def _edge_alignment_candidates(
     moving_start: Pt,
     moving_end: Pt,
     minimum_contact: float,
+    reverse_direction: bool = True,
 ) -> List[Tuple[float, Pt, float, float]]:
     """生成整边匹配以及兼容 T 形接缝的候选位姿。
 
@@ -426,7 +490,11 @@ def _edge_alignment_candidates(
     if fixed_length <= EPS or moving_length <= EPS:
         return []
 
-    target_direction = fixed_start.sub(fixed_end)
+    target_direction = (
+        fixed_start.sub(fixed_end)
+        if reverse_direction
+        else fixed_end.sub(fixed_start)
+    )
     angle = _angle_wrap(
         math.atan2(target_direction.y, target_direction.x)
         - math.atan2(source_direction.y, source_direction.x)
@@ -436,13 +504,22 @@ def _edge_alignment_candidates(
     fixed_midpoint = fixed_start.lerp(fixed_end, 0.5)
     moving_midpoint = rotated_start.lerp(rotated_end, 0.5)
 
-    centers = [
-        fixed_end.sub(rotated_start),
-        fixed_start.sub(rotated_end),
-        fixed_start.sub(rotated_start),
-        fixed_end.sub(rotated_end),
-        fixed_midpoint.sub(moving_midpoint),
-    ]
+    if reverse_direction:
+        centers = [
+            fixed_end.sub(rotated_start),
+            fixed_start.sub(rotated_end),
+            fixed_start.sub(rotated_start),
+            fixed_end.sub(rotated_end),
+            fixed_midpoint.sub(moving_midpoint),
+        ]
+    else:
+        centers = [
+            fixed_start.sub(rotated_start),
+            fixed_end.sub(rotated_end),
+            fixed_start.sub(rotated_end),
+            fixed_end.sub(rotated_start),
+            fixed_midpoint.sub(moving_midpoint),
+        ]
     axis = fixed_direction.scale(1.0 / fixed_length)
     results: List[Tuple[float, Pt, float, float]] = []
     seen = set()
@@ -486,16 +563,47 @@ def _prepare_pieces(pieces: Sequence[Dict]) -> List[Dict]:
             raise ValueError(f"piece {index} has more than eight edges")
         source_center = polygon_centroid(observed)
         local_points = [point.sub(source_center) for point in observed]
+        edge_lengths = [
+            local_points[edge_index].dist(
+                local_points[(edge_index + 1) % len(local_points)]
+            )
+            for edge_index in range(len(local_points))
+        ]
         prepared.append(
             {
                 "index": index,
                 "source_center": source_center,
                 "source_orientation": polygon_orientation(observed),
                 "local_points": local_points,
+                "edge_count": len(local_points),
+                "edge_lengths": edge_lengths,
                 "area": polygon_area(local_points),
             }
         )
     return prepared
+
+
+def _triangle_similar_edge_indices(
+    piece: Dict,
+    edge_index: int,
+    tolerance_mm: float,
+    relative_tolerance: float,
+) -> List[int]:
+    if int(piece.get("edge_count", 0)) != 3:
+        return []
+    edge_lengths = piece.get("edge_lengths", [])
+    if not isinstance(edge_lengths, list) or edge_index >= len(edge_lengths):
+        return []
+    base_length = float(edge_lengths[edge_index])
+    similar: List[int] = []
+    for other_index, other_length_raw in enumerate(edge_lengths):
+        if other_index == edge_index:
+            continue
+        other_length = float(other_length_raw)
+        allowed = max(float(tolerance_mm), float(relative_tolerance) * max(base_length, other_length))
+        if abs(base_length - other_length) <= allowed:
+            similar.append(other_index)
+    return similar
 
 
 def _dimensions_valid(
@@ -536,6 +644,21 @@ def find_rectangle_solution(
     max_candidates_per_node: int = 128,
     max_partial_candidates_per_node: int = 32,
     max_complete_solutions: int = 12,
+    anchor_count: int = 1,
+    partial_match_penalty: float = 0.18,
+    triangle_keep_per_piece: int = 0,
+    triangle_min_angle_diff_rad: float = 0.0,
+    triangle_symmetry_edge_tolerance_mm: float = 0.0,
+    triangle_symmetry_edge_relative_tolerance: float = 0.0,
+    triangle_symmetry_length_bonus_mm: float = 0.0,
+    triangle_flip_side_enabled: bool = False,
+    triangle_flip_solution_quota: int = 0,
+    triangle_flip_requires_similar_edge: bool = True,
+    triangle_flip_max_alignments_per_edge_pair: int = 2,
+    triangle_flip_candidate_quota: int = 0,
+    triangle_flip_partial_diagonal_extra_mm: float = 0.0,
+    triangle_flip_partial_area_scale: float = 1.0,
+    triangle_flip_priority_bonus: float = 0.0,
     diagnostics: Optional[Dict] = None,
 ) -> Optional[Dict]:
     """寻找一个互不重叠且组合后能够填满矩形的布局。
@@ -580,15 +703,13 @@ def find_rectangle_solution(
                 match_quality += best_quality
         return match_count, match_quality, piece["area"]
 
-    anchor_index = max(prepared, key=anchor_score)["index"]
-    poses: Dict[int, Tuple[float, Pt]] = {
-        anchor_index: (0.0, Pt(0.0, 0.0))
-    }
-    world_polygons: Dict[int, List[Pt]] = {
-        anchor_index: transform_polygon(
-            prepared[anchor_index]["local_points"], 0.0, Pt(0.0, 0.0)
-        )
-    }
+    anchor_order = [
+        piece["index"]
+        for piece in sorted(prepared, key=anchor_score, reverse=True)
+    ]
+    anchor_limit = len(anchor_order) if int(anchor_count) <= 0 else min(len(anchor_order), int(anchor_count))
+    poses: Dict[int, Tuple[float, Pt]] = {}
+    world_polygons: Dict[int, List[Pt]] = {}
     best_solution: Optional[Dict] = None
     complete_solutions: List[Dict] = []
     complete_solution_keys: Set[Tuple] = set()
@@ -609,18 +730,29 @@ def find_rectangle_solution(
         "area_rejections": 0,
         "no_candidate_nodes": 0,
         "candidate_pruned_by_limit": 0,
+        "triangle_diverse_kept": 0,
+        "triangle_flip_alignment_candidates": 0,
+        "triangle_flip_solution_kept": 0,
+        "triangle_flip_candidates_kept": 0,
+        "triangle_flip_overlap_rejections": 0,
+        "triangle_flip_geometry_rejections": 0,
         "candidate_counts_by_depth": [],
-        "anchor_index": anchor_index,
+        "anchor_index": anchor_order[0] if anchor_order else -1,
+        "anchor_indices_tried": [],
         "piece_count": len(prepared),
         "total_piece_area_mm2": total_piece_area,
     }
 
     def partial_geometry_rectangle(
         candidate_polygons: Iterable[Sequence[Pt]],
+        *,
+        diagonal_extra_mm: float = 0.0,
+        area_scale: float = 1.0,
     ) -> Optional[Dict]:
+        safe_area_scale = max(1.0, float(area_scale))
         maximum_final_area = float("inf")
         if size_range_mm is not None:
-            maximum_final_area = total_piece_area / max(
+            maximum_final_area = safe_area_scale * total_piece_area / max(
                 1.0 - rectangle_area_tolerance, EPS
             )
         all_points = [point for polygon in candidate_polygons for point in polygon]
@@ -632,7 +764,7 @@ def find_rectangle_solution(
         if size_range_mm is None:
             return rectangle
         short_range, long_range = size_range_mm
-        maximum_area = (
+        maximum_area = safe_area_scale * (
             (short_range[1] + dimension_tolerance_mm)
             * (long_range[1] + dimension_tolerance_mm)
         )
@@ -642,15 +774,15 @@ def find_rectangle_solution(
         maximum_diagonal = math.hypot(
             short_range[1] + dimension_tolerance_mm,
             long_range[1] + dimension_tolerance_mm,
-        )
+        ) + max(0.0, float(diagonal_extra_mm))
         for first_index, first in enumerate(all_points):
             for second in all_points[first_index + 1 :]:
                 if first.dist(second) > maximum_diagonal:
                     return None
         return rectangle
 
-    def evaluate(edge_error: float) -> bool:
-        nonlocal best_solution
+    def evaluate(edge_error: float, uses_triangle_flip: bool) -> bool:
+        nonlocal best_solution, complete_solutions
 
         all_points = [
             point for polygon in world_polygons.values() for point in polygon
@@ -690,6 +822,7 @@ def find_rectangle_solution(
             "area_error": area_error,
             "rectangle": rectangle,
             "poses": dict(poses),
+            "uses_triangle_flip": bool(uses_triangle_flip),
             "world_polygons": {
                 index: list(points) for index, points in world_polygons.items()
             },
@@ -697,24 +830,54 @@ def find_rectangle_solution(
         complete_solutions.append(solution_record)
         complete_solutions.sort(key=lambda solution: solution["score"])
         if len(complete_solutions) > max_complete_solutions:
-            removed = complete_solutions.pop()
-            removed_key = tuple(
-                sorted(
-                    (
-                        int(index),
-                        round(angle, 6),
-                        round(center.x, 3),
-                        round(center.y, 3),
-                    )
-                    for index, (angle, center) in removed["poses"].items()
-                )
+            flip_quota = max(
+                0,
+                min(int(triangle_flip_solution_quota), int(max_complete_solutions)),
             )
-            if removed_key != solution_key:
-                complete_solution_keys.discard(removed_key)
+            kept_solutions: List[Dict] = []
+            kept_ids: Set[int] = set()
+            if flip_quota > 0:
+                for solution in complete_solutions:
+                    if len(kept_solutions) >= flip_quota:
+                        break
+                    if not bool(solution.get("uses_triangle_flip", False)):
+                        continue
+                    kept_solutions.append(solution)
+                    kept_ids.add(id(solution))
+            for solution in complete_solutions:
+                if len(kept_solutions) >= max_complete_solutions:
+                    break
+                if id(solution) in kept_ids:
+                    continue
+                kept_solutions.append(solution)
+                kept_ids.add(id(solution))
+            removed_solutions = [
+                solution
+                for solution in complete_solutions
+                if id(solution) not in kept_ids
+            ]
+            complete_solutions = kept_solutions
+            for removed in removed_solutions:
+                removed_key = tuple(
+                    sorted(
+                        (
+                            int(index),
+                            round(angle, 6),
+                            round(center.x, 3),
+                            round(center.y, 3),
+                        )
+                        for index, (angle, center) in removed["poses"].items()
+                    )
+                )
+                if removed_key != solution_key:
+                    complete_solution_keys.discard(removed_key)
+        stats["triangle_flip_solution_kept"] = sum(
+            1 for solution in complete_solutions if bool(solution.get("uses_triangle_flip", False))
+        )
         best_solution = complete_solutions[0]
         return True
 
-    def recurse(edge_error: float) -> bool:
+    def recurse(edge_error: float, uses_triangle_flip: bool) -> bool:
         nonlocal search_nodes
         search_nodes += 1
         stats["search_nodes"] = search_nodes
@@ -722,7 +885,7 @@ def find_rectangle_solution(
             stats["search_limit_reached"] = True
             return True
         if len(poses) == len(prepared):
-            evaluate(edge_error)
+            evaluate(edge_error, uses_triangle_flip)
             return False
 
         candidate_keys: Set[Tuple] = set()
@@ -740,93 +903,192 @@ def find_rectangle_solution(
                     fixed_length = fixed_start.dist(fixed_end)
 
                     for moving_edge_index in range(len(moving_points)):
-                        moving_start, moving_end = _edge(
-                            moving_points, moving_edge_index
+                        edge_variants = [(moving_edge_index, False, 0.0)]
+                        similar_edge_indices = _triangle_similar_edge_indices(
+                            prepared[moving_index],
+                            moving_edge_index,
+                            triangle_symmetry_edge_tolerance_mm,
+                            triangle_symmetry_edge_relative_tolerance,
                         )
-                        moving_length = moving_start.dist(moving_end)
-                        allowed_error = max(
-                            edge_tolerance_mm,
-                            edge_relative_tolerance * max(fixed_length, moving_length),
-                        )
-                        length_error = abs(fixed_length - moving_length)
-                        minimum_contact = max(
-                            minimum_edge_contact_mm,
-                            minimum_edge_contact_ratio
-                            * min(fixed_length, moving_length),
-                        )
-                        alignments = _edge_alignment_candidates(
-                            fixed_start,
-                            fixed_end,
-                            moving_start,
-                            moving_end,
-                            minimum_contact,
-                        )
-                        for angle, center, contact_ratio, contact_length in alignments:
-                            key = (
-                                moving_index,
-                                round(angle, 6),
-                                round(center.x, 4),
-                                round(center.y, 4),
-                            )
-                            if key in candidate_keys:
-                                continue
-                            candidate_keys.add(key)
-
-                            candidate_polygon = transform_polygon(
-                                moving_points, angle, center
-                            )
-                            if any(
-                                polygons_overlap(
-                                    candidate_polygon,
-                                    placed_polygon,
-                                    overlap_tolerance_mm,
+                        if similar_edge_indices:
+                            similar_lengths = [
+                                float(prepared[moving_index]["edge_lengths"][idx])
+                                for idx in [moving_edge_index] + similar_edge_indices
+                            ]
+                            shared_length = float(sum(similar_lengths) / len(similar_lengths))
+                            for alt_edge_index in similar_edge_indices:
+                                edge_variants.append(
+                                    (
+                                        alt_edge_index,
+                                        True,
+                                        max(
+                                            0.0,
+                                            triangle_symmetry_length_bonus_mm,
+                                        ),
+                                    )
                                 )
-                                for placed_polygon in placed_polygons
-                            ):
-                                stats["overlap_rejections"] += 1
-                                continue
-                            partial_rectangle = partial_geometry_rectangle(
-                                placed_polygons + [candidate_polygon]
-                            )
-                            if partial_rectangle is None:
-                                stats["geometry_rejections"] += 1
-                                continue
+                        else:
+                            shared_length = 0.0
 
-                            placed_area = current_placed_area + moving_area
-                            empty_area_ratio = 0.0
-                            empty_area_ratio = max(
-                                0.0,
-                                partial_rectangle["area"] - placed_area,
-                            ) / total_piece_area
-
-                            # 等长接缝比任意局部接触包含更多约束信息。局部接触
-                            # 仍保留给 T 形接缝，但在真正的整边匹配之后再尝试。
-                            seam_error = (
-                                1.0
-                                - contact_ratio
-                                + length_error / max(fixed_length, moving_length)
+                        for candidate_edge_index, symmetry_generated, length_bonus_mm in edge_variants:
+                            moving_start, moving_end = _edge(
+                                moving_points, candidate_edge_index
                             )
-                            full_edge_match = length_error <= allowed_error
-                            if full_edge_match:
-                                stats["full_edge_candidates"] += 1
-                            else:
-                                stats["partial_edge_candidates"] += 1
-                            priority = seam_error + 0.5 * empty_area_ratio
-                            candidates.append(
+                            moving_length = float(prepared[moving_index]["edge_lengths"][candidate_edge_index])
+                            effective_moving_length = (
+                                shared_length if symmetry_generated and shared_length > EPS else moving_length
+                            )
+                            effective_moving_length = max(
+                                EPS,
+                                effective_moving_length + length_bonus_mm,
+                            )
+                            allowed_error = max(
+                                edge_tolerance_mm,
+                                edge_relative_tolerance * max(fixed_length, effective_moving_length),
+                            )
+                            length_error = abs(fixed_length - effective_moving_length)
+                            minimum_contact = max(
+                                minimum_edge_contact_mm,
+                                minimum_edge_contact_ratio
+                                * min(fixed_length, effective_moving_length),
+                            )
+                            alignment_variants = [
                                 (
-                                    moving_index,
-                                    fixed_index,
-                                    fixed_edge_index,
-                                    moving_edge_index,
                                     angle,
                                     center,
-                                    candidate_polygon,
-                                    seam_error,
+                                    contact_ratio,
                                     contact_length,
-                                    full_edge_match,
-                                    priority,
+                                    False,
+                                )
+                                for angle, center, contact_ratio, contact_length in _edge_alignment_candidates(
+                                    fixed_start,
+                                    fixed_end,
+                                    moving_start,
+                                    moving_end,
+                                    minimum_contact,
+                                    True,
+                                )
+                            ]
+                            alignments = alignment_variants
+                            flip_allowed = (
+                                triangle_flip_side_enabled
+                                and int(prepared[moving_index].get("edge_count", 0)) == 3
+                                and (
+                                    not triangle_flip_requires_similar_edge
+                                    or bool(similar_edge_indices)
+                                    or bool(symmetry_generated)
                                 )
                             )
+                            if flip_allowed:
+                                flip_alignments = [
+                                    (
+                                        angle,
+                                        center,
+                                        contact_ratio,
+                                        contact_length,
+                                        True,
+                                    )
+                                    for angle, center, contact_ratio, contact_length in _edge_alignment_candidates(
+                                        fixed_start,
+                                        fixed_end,
+                                        moving_start,
+                                        moving_end,
+                                        minimum_contact,
+                                        False,
+                                    )
+                                ]
+                                if triangle_flip_max_alignments_per_edge_pair > 0 and len(flip_alignments) > triangle_flip_max_alignments_per_edge_pair:
+                                    flip_alignments.sort(
+                                        key=lambda item: (-item[2], -item[3])
+                                    )
+                                    flip_alignments = flip_alignments[
+                                        :triangle_flip_max_alignments_per_edge_pair
+                                    ]
+                                stats["triangle_flip_alignment_candidates"] += len(flip_alignments)
+                                alignments.extend(flip_alignments)
+                            for angle, center, contact_ratio, contact_length, flip_generated in alignments:
+                                key = (
+                                    moving_index,
+                                    round(angle, 6),
+                                    round(center.x, 4),
+                                    round(center.y, 4),
+                                )
+                                if key in candidate_keys:
+                                    continue
+                                candidate_keys.add(key)
+
+                                candidate_polygon = transform_polygon(
+                                    moving_points, angle, center
+                                )
+                                if any(
+                                    polygons_overlap(
+                                        candidate_polygon,
+                                        placed_polygon,
+                                        overlap_tolerance_mm,
+                                    )
+                                    for placed_polygon in placed_polygons
+                                ):
+                                    stats["overlap_rejections"] += 1
+                                    if flip_generated:
+                                        stats["triangle_flip_overlap_rejections"] += 1
+                                    continue
+                                partial_rectangle = partial_geometry_rectangle(
+                                    placed_polygons + [candidate_polygon],
+                                    diagonal_extra_mm=(
+                                        triangle_flip_partial_diagonal_extra_mm
+                                        if flip_generated
+                                        else 0.0
+                                    ),
+                                    area_scale=(
+                                        triangle_flip_partial_area_scale
+                                        if flip_generated
+                                        else 1.0
+                                    ),
+                                )
+                                if partial_rectangle is None:
+                                    stats["geometry_rejections"] += 1
+                                    if flip_generated:
+                                        stats["triangle_flip_geometry_rejections"] += 1
+                                    continue
+
+                                placed_area = current_placed_area + moving_area
+                                empty_area_ratio = 0.0
+                                empty_area_ratio = max(
+                                    0.0,
+                                    partial_rectangle["area"] - placed_area,
+                                ) / total_piece_area
+
+                                # 对近似等边 / 等腰三角形，允许近似等长边共享一个更稳的
+                                # 参考边长，避免替代接边方式因为毫米级误差被过早剪掉。
+                                seam_error = (
+                                    1.0
+                                    - contact_ratio
+                                    + length_error / max(fixed_length, effective_moving_length)
+                                )
+                                full_edge_match = length_error <= allowed_error
+                                if full_edge_match:
+                                    stats["full_edge_candidates"] += 1
+                                else:
+                                    stats["partial_edge_candidates"] += 1
+                                priority = seam_error + 0.5 * empty_area_ratio - (
+                                    triangle_flip_priority_bonus if flip_generated else 0.0
+                                )
+                                candidates.append(
+                                    (
+                                        moving_index,
+                                        fixed_index,
+                                        fixed_edge_index,
+                                        candidate_edge_index,
+                                        angle,
+                                        center,
+                                        candidate_polygon,
+                                        seam_error,
+                                        contact_length,
+                                        full_edge_match,
+                                        priority,
+                                        flip_generated,
+                                    )
+                                )
 
         stats["candidate_states"] += len(candidates)
         if not candidates:
@@ -841,22 +1103,84 @@ def find_rectangle_solution(
         # 的碎片对，只在确有需要时才回退到 T 形接缝布局。
         candidates.sort(
             key=lambda candidate: (
-                not candidate[-2],
-                candidate[-1],
-                -candidate[-3],
+                candidate[10] + (0.0 if candidate[9] else partial_match_penalty),
+                -candidate[8],
             )
         )
         if len(candidates) > max_candidates_per_node:
             kept_candidates = []
+            kept_keys: Set[Tuple] = set()
             kept_partial = 0
+            kept_flip = 0
+
+            if triangle_flip_candidate_quota > 0:
+                for candidate in candidates:
+                    if kept_flip >= triangle_flip_candidate_quota:
+                        break
+                    if not bool(candidate[11]):
+                        continue
+                    candidate_key = (
+                        int(candidate[0]),
+                        round(float(candidate[4]), 6),
+                        round(float(candidate[5].x), 4),
+                        round(float(candidate[5].y), 4),
+                    )
+                    if candidate_key in kept_keys:
+                        continue
+                    kept_candidates.append(candidate)
+                    kept_keys.add(candidate_key)
+                    kept_flip += 1
+                stats["triangle_flip_candidates_kept"] += kept_flip
+
+            if triangle_keep_per_piece > 0 and triangle_min_angle_diff_rad > 1e-6:
+                triangle_angles: Dict[int, List[float]] = {}
+                for candidate in candidates:
+                    moving_index = int(candidate[0])
+                    angle = float(candidate[4])
+                    if int(prepared[moving_index].get("edge_count", 0)) != 3:
+                        continue
+                    kept_for_piece = triangle_angles.setdefault(moving_index, [])
+                    if len(kept_for_piece) >= triangle_keep_per_piece:
+                        continue
+                    if any(
+                        abs(_angle_wrap(angle - existing_angle)) < triangle_min_angle_diff_rad
+                        for existing_angle in kept_for_piece
+                    ):
+                        continue
+                    candidate_key = (
+                        int(candidate[0]),
+                        round(float(candidate[4]), 6),
+                        round(float(candidate[5].x), 4),
+                        round(float(candidate[5].y), 4),
+                    )
+                    if candidate_key in kept_keys:
+                        continue
+                    kept_candidates.append(candidate)
+                    kept_keys.add(candidate_key)
+                    kept_for_piece.append(angle)
+                    if not bool(candidate[9]):
+                        kept_partial += 1
+                    stats["triangle_diverse_kept"] += 1
+                    if len(kept_candidates) >= max_candidates_per_node:
+                        break
             for candidate in candidates:
                 if len(kept_candidates) >= max_candidates_per_node:
                     break
-                if candidate[-2]:
+                candidate_key = (
+                    int(candidate[0]),
+                    round(float(candidate[4]), 6),
+                    round(float(candidate[5].x), 4),
+                    round(float(candidate[5].y), 4),
+                )
+                if candidate_key in kept_keys:
+                    continue
+                if bool(candidate[9]):
                     kept_candidates.append(candidate)
+                    kept_keys.add(candidate_key)
                     continue
                 if kept_partial < max_partial_candidates_per_node:
                     kept_candidates.append(candidate)
+                    kept_keys.add(candidate_key)
                     kept_partial += 1
             stats["candidate_pruned_by_limit"] += max(
                 0, len(candidates) - len(kept_candidates)
@@ -875,13 +1199,17 @@ def find_rectangle_solution(
                 contact_length,
                 full_edge_match,
                 priority,
+                flip_generated,
             ) = candidate
             del contact_length, full_edge_match, priority
 
             poses[moving_index] = (angle, center)
             world_polygons[moving_index] = candidate_polygon
 
-            stop_search = recurse(edge_error + normalized_edge_error)
+            stop_search = recurse(
+                edge_error + normalized_edge_error,
+                uses_triangle_flip or bool(flip_generated),
+            )
 
             del world_polygons[moving_index]
             del poses[moving_index]
@@ -889,7 +1217,17 @@ def find_rectangle_solution(
                 return True
         return False
 
-    recurse(0.0)
+    for anchor_index in anchor_order[:anchor_limit]:
+        stats["anchor_indices_tried"].append(int(anchor_index))
+        poses = {anchor_index: (0.0, Pt(0.0, 0.0))}
+        world_polygons = {
+            anchor_index: transform_polygon(
+                prepared[anchor_index]["local_points"], 0.0, Pt(0.0, 0.0)
+            )
+        }
+        stop_search = recurse(0.0, False)
+        if stop_search:
+            break
     stats["returned_complete_solutions"] = len(complete_solutions)
     if diagnostics is not None:
         diagnostics.clear()
@@ -939,6 +1277,7 @@ def find_rectangle_solution(
             "rectangle": rectangle,
             "score": solution_record["score"],
             "area_error": solution_record["area_error"],
+            "uses_triangle_flip": bool(solution_record.get("uses_triangle_flip", False)),
             "poses": normalized_poses,
             "world_polygons": {
                 index: [point.add(shift) for point in polygon]
@@ -1497,6 +1836,7 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
                        gw=0.35, nw=0.30, ow=0.35, pw=0.45,
                        fallback_full_rect_penalty=0.12,
                        fallback_sparse_seam_penalty=0.08,
+                       geometry_candidate_min_angle_diff_rad=0.0,
                        angle_perturb_rad=0.035,
                        translate_perturb_mm=1.2):
     """Geometry + texture joint solver with top-K re-ranking.
@@ -1524,7 +1864,17 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
     candidates = list(sol.get("geometry_candidates", []))
     if not candidates:
         candidates = [sol]
-    candidates = candidates[: max(1, top_k)]
+    candidates = _select_diverse_geometry_candidates(
+        candidates,
+        max(1, top_k),
+        float(geometry_candidate_min_angle_diff_rad),
+    )
+    for candidate in candidates:
+        candidate["candidate_source"] = (
+            "geometry_flip"
+            if bool(candidate.get("uses_triangle_flip", False))
+            else "geometry"
+        )
 
     # Step 2: Generate perturbed alternatives to fill the remaining slots
     base_solution = candidates[0]
@@ -1566,6 +1916,7 @@ def solve_with_texture(pieces_geometry, pieces_texture, target_center=None,
             alt['poses'] = perturbed_poses
             alt['world_polygons'] = perturbed_world
             alt['score'] = base_solution['score'] + 0.05
+            alt['candidate_source'] = "perturb"
             # Copy placements with updated positions
             alt_placements = copy.deepcopy(base_solution.get('placements', []))
             for pl in alt_placements:

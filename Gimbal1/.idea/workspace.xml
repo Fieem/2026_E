@@ -37,7 +37,6 @@
   <component name="ChangeListManager">
     <list default="true" id="1f7f0edf-0229-41fd-adbd-51ee79e766d0" name="更改" comment="Gimbal1_init">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../Vision/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/../Vision/README.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/../Vision/camera_pipeline.py" beforeDir="false" afterPath="$PROJECT_DIR$/../Vision/camera_pipeline.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/../Vision/vision_config.json" beforeDir="false" afterPath="$PROJECT_DIR$/../Vision/vision_config.json" afterDir="false" />
     </list>
@@ -122,6 +121,11 @@
   }
 }]]></component>
   <component name="RunManager" selected="OpenOCD 下载并运行.Gimbal1">
+    <configuration default="true" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true">
+      <method v="2">
+        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+      </method>
+    </configuration>
     <configuration name="FreeRTOS" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="Gimbal1" TARGET_NAME="FreeRTOS" CONFIG_NAME="Debug - Debug">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
@@ -189,7 +193,7 @@
       <workItem from="1785331283477" duration="315000" />
       <workItem from="1785331614207" duration="313000" />
       <workItem from="1785331933963" duration="1150000" />
-      <workItem from="1785374075256" duration="26276000" />
+      <workItem from="1785374075256" duration="28758000" />
     </task>
     <task id="LOCAL-00001" summary="7.5start">
       <option name="closed" value="true" />

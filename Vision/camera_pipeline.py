@@ -1108,6 +1108,7 @@ def _draw_textured_target_assembly(
     solution: Dict,
     pixels_per_mm: float,
     config: Dict,
+    draw_annotations: bool = True,
 ) -> None:
     """把每块检测到的真实纹理按求解位姿贴到目标布局中。"""
 
@@ -1181,22 +1182,23 @@ def _draw_textured_target_assembly(
         )
         after[warped_mask > 0] = warped_image[warped_mask > 0]
 
-        target_polygon = np.array(
-            [[round(point.x), round(point.y)] for point in target_points],
-            dtype=np.int32,
-        )
-        cv2.polylines(after, [target_polygon], True, COLORS[index % len(COLORS)], 2, cv2.LINE_AA)
-        center = point_mm_to_px(placement["target_center"], pixels_per_mm, config)
-        cv2.putText(
-            after,
-            str(index),
-            center,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            (20, 20, 20),
-            3,
-            cv2.LINE_AA,
-        )
+        if draw_annotations:
+            target_polygon = np.array(
+                [[round(point.x), round(point.y)] for point in target_points],
+                dtype=np.int32,
+            )
+            cv2.polylines(after, [target_polygon], True, COLORS[index % len(COLORS)], 2, cv2.LINE_AA)
+            center = point_mm_to_px(placement["target_center"], pixels_per_mm, config)
+            cv2.putText(
+                after,
+                str(index),
+                center,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (20, 20, 20),
+                3,
+                cv2.LINE_AA,
+            )
 
 
 def create_solution_texture_canvas(
@@ -1205,11 +1207,19 @@ def create_solution_texture_canvas(
     solution: Dict,
     pixels_per_mm: float,
     config: Dict,
+    draw_annotations: bool = True,
 ) -> np.ndarray:
     """将求解后的真实碎片纹理贴到目标布局画布上。"""
 
     canvas = np.full_like(corrected, 245)
-    _draw_textured_target_assembly(canvas, pieces, solution, pixels_per_mm, config)
+    _draw_textured_target_assembly(
+        canvas,
+        pieces,
+        solution,
+        pixels_per_mm,
+        config,
+        draw_annotations=draw_annotations,
+    )
     return canvas
 
 
@@ -1236,6 +1246,7 @@ def render_solution_card_preview(
     config: Dict,
     canvas_width_px: int,
     canvas_height_px: int,
+    draw_annotations: bool = False,
 ) -> Optional[np.ndarray]:
     """把候选拼法渲染为标准化整牌图。"""
 
@@ -1263,6 +1274,7 @@ def render_solution_card_preview(
         solution,
         pixels_per_mm,
         config,
+        draw_annotations=draw_annotations,
     )
     short_px = min(int(canvas_width_px), int(canvas_height_px))
     long_px = max(int(canvas_width_px), int(canvas_height_px))
@@ -1320,6 +1332,86 @@ def create_result_panel(
     if image.shape[1] != target_size[0] or image.shape[0] != target_size[1]:
         image = cv2.resize(image, target_size, interpolation=cv2.INTER_AREA)
     return add_panel_title(image, title)
+
+
+def build_preview_signature(image: np.ndarray, size: Tuple[int, int] = (48, 72)) -> np.ndarray:
+    """把候选整牌图压缩成稳定的小特征图，用于候选去重。"""
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image.copy()
+    resized = cv2.resize(gray, size, interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+    mean = float(np.mean(resized))
+    std = float(np.std(resized))
+    if std > 1e-6:
+        resized = (resized - mean) / std
+    else:
+        resized = resized - mean
+    return resized
+
+
+def preview_signature_distance(first: np.ndarray, second: np.ndarray) -> float:
+    """返回两个候选预览图的平均绝对差，越小表示越像。"""
+
+    return float(np.mean(np.abs(first - second)))
+
+
+def create_candidate_gallery(
+    candidate_previews: Sequence[Dict],
+    columns: int = 3,
+) -> Optional[np.ndarray]:
+    """生成候选拼法总览图，便于人工确认正确拼法是否存在。"""
+
+    if not candidate_previews:
+        return None
+
+    valid_items = [
+        item
+        for item in candidate_previews
+        if isinstance(item, dict) and isinstance(item.get("image"), np.ndarray)
+    ]
+    if not valid_items:
+        return None
+
+    columns = max(1, int(columns))
+    cell_width = max(int(item["image"].shape[1]) for item in valid_items)
+    cell_height = max(int(item["image"].shape[0]) for item in valid_items)
+    cell_size = (cell_width, cell_height)
+    panels: List[np.ndarray] = []
+    blank_panel = np.full((cell_height, cell_width, 3), 245, dtype=np.uint8)
+
+    for item in valid_items:
+        candidate_index = int(item.get("candidate_index", 0))
+        score = float(item.get("score", 0.0))
+        template_name = str(item.get("template_name", ""))
+        source = str(item.get("candidate_source", ""))
+        if source == "geometry_flip":
+            source_tag = "F"
+        elif source == "geometry":
+            source_tag = "G"
+        elif source == "perturb":
+            source_tag = "P"
+        else:
+            source_tag = source[:1].upper() if source else "?"
+        title = f"C{candidate_index}{source_tag} {score:.3f} {template_name}"
+        panels.append(create_result_panel(item["image"], title, cell_size))
+
+    while len(panels) % columns != 0:
+        panels.append(create_result_panel(blank_panel, "EMPTY", cell_size))
+
+    separator_v = np.full((panels[0].shape[0], 6, 3), 90, dtype=np.uint8)
+    row_images: List[np.ndarray] = []
+    for start in range(0, len(panels), columns):
+        row = panels[start:start + columns]
+        row_image = row[0]
+        for panel in row[1:]:
+            row_image = np.hstack((row_image, separator_v.copy(), panel))
+        row_images.append(row_image)
+
+    gallery = row_images[0]
+    if len(row_images) > 1:
+        separator_h = np.full((6, gallery.shape[1], 3), 90, dtype=np.uint8)
+        for row_image in row_images[1:]:
+            gallery = np.vstack((gallery, separator_h.copy(), row_image))
+    return gallery
 
 
 def create_result_image(
@@ -1387,6 +1479,7 @@ def create_result_image(
         )
         template_preview = template_visuals.get("template_preview")
         mask_comparison = template_visuals.get("mask_comparison")
+        candidate_gallery = template_visuals.get("candidate_gallery")
         if (
             isinstance(card_preview, np.ndarray)
             and isinstance(template_preview, np.ndarray)
@@ -1403,6 +1496,13 @@ def create_result_image(
             )
             row_separator = np.full((8, top_row.shape[1], 3), 90, dtype=np.uint8)
             combined = np.vstack((top_row, row_separator, bottom_row))
+            if isinstance(candidate_gallery, np.ndarray):
+                gallery_panel = create_result_panel(
+                    candidate_gallery,
+                    "JQK CANDIDATE GALLERY",
+                    (combined.shape[1], max(1, combined.shape[0] // 2)),
+                )
+                combined = np.vstack((combined, row_separator.copy(), gallery_panel))
 
     if solution is None:
         image_message = "DETECTION FAILED - see latest_result.json"
@@ -1449,13 +1549,31 @@ def rerank_solution_with_jqk_templates(
     )
     candidates = list(solve_result.get("candidates", []))
     candidate_limit = max(1, int(jqk_template.get("candidate_top_k", 7)))
+    raw_candidate_limit = max(
+        candidate_limit,
+        int(jqk_template.get("candidate_scan_limit", candidate_limit * 4)),
+    )
+    preview_min_diff = float(
+        jqk_template.get("candidate_preview_min_diff", 0.05)
+    )
     if not candidates:
         diagnostics["template_enabled"] = True
         diagnostics["template_error"] = "no_geometry_candidates"
         return None
 
     match_results: List[Dict] = []
-    for candidate_index, candidate in enumerate(candidates[:candidate_limit]):
+    preview_signatures: List[np.ndarray] = []
+    duplicate_preview_skips = 0
+    ordered_candidates = sorted(
+        list(enumerate(candidates[:raw_candidate_limit])),
+        key=lambda item: (
+            str(item[1].get("candidate_source", "geometry")) != "geometry",
+            item[0],
+        ),
+    )
+    for candidate_index, candidate in ordered_candidates:
+        if len(match_results) >= candidate_limit:
+            break
         solution = candidate.get("geometry")
         if not isinstance(solution, dict):
             continue
@@ -1470,6 +1588,14 @@ def rerank_solution_with_jqk_templates(
         )
         if card_preview is None:
             continue
+        preview_signature = build_preview_signature(card_preview)
+        if any(
+            preview_signature_distance(preview_signature, existing) < preview_min_diff
+            for existing in preview_signatures
+        ):
+            duplicate_preview_skips += 1
+            continue
+        preview_signatures.append(preview_signature)
         match = match_card_to_templates(
             card_preview,
             template_dir,
@@ -1494,10 +1620,16 @@ def rerank_solution_with_jqk_templates(
             texture_info.get("fallback_sparse_seam", False)
         )
         match["texture_seam_count"] = len(texture_info.get("seam_scores", []))
+        match["candidate_source"] = str(candidate.get("candidate_source", "geometry"))
         match["solution"] = solution
         match_results.append(match)
 
     diagnostics["template_enabled"] = True
+    diagnostics["template_duplicate_preview_skips"] = int(duplicate_preview_skips)
+    diagnostics["template_raw_candidate_scan_count"] = int(
+        min(len(candidates), raw_candidate_limit)
+    )
+    diagnostics["template_unique_preview_count"] = int(len(match_results))
     if not match_results:
         diagnostics["template_error"] = "no_template_match_result"
         return None
@@ -1556,6 +1688,7 @@ def rerank_solution_with_jqk_templates(
                 "candidate_index": int(match.get("candidate_index", 0)),
                 "template_name": str(match.get("best_name", "")),
                 "score": float(match.get("best_score", 0.0)),
+                "candidate_source": str(match.get("candidate_source", "geometry")),
                 "orientation_deg": int(match.get("best_orientation_deg", 0)),
                 "geometry_score": float(match.get("geometry_score", 0.0)),
                 "texture_rank_score": float(match.get("texture_rank_score", 0.0)),
@@ -1590,7 +1723,22 @@ def rerank_solution_with_jqk_templates(
         "card_preview": best_match.get("card_preview"),
         "template_preview": best_match.get("template_preview"),
         "mask_comparison": best_match.get("mask_comparison"),
+        "candidate_previews": [
+            {
+                "candidate_index": int(match.get("candidate_index", 0)),
+                "score": float(match.get("best_score", 0.0)),
+                "template_name": str(match.get("best_name", "")),
+                "candidate_source": str(match.get("candidate_source", "geometry")),
+                "image": match.get("card_preview"),
+            }
+            for match in valid_results
+            if isinstance(match.get("card_preview"), np.ndarray)
+        ],
     }
+    template_visuals["candidate_gallery"] = create_candidate_gallery(
+        template_visuals["candidate_previews"],
+        columns=3,
+    )
     return best_match["solution"], template_info, template_visuals
 
 
@@ -1638,6 +1786,7 @@ def solve_texture_aware_solution(
 
     texture_enabled = texture_pipeline_enabled(config)
     template_enabled = jqk_template_enabled(config)
+    is_playing_cards = str(config.get("piece_mode", "")).lower() == "playing_cards"
     texture = config.get("texture", {})
     jqk_template = config.get("jqk_template", {})
     solver = config.get("solver", {})
@@ -1646,11 +1795,191 @@ def solve_texture_aware_solution(
         int(texture.get("candidate_top_k", 7)) if texture_enabled else 1,
         int(jqk_template.get("candidate_top_k", 7)) if template_enabled else 1,
     )
+    if is_playing_cards:
+        rerank_top_k = max(
+            rerank_top_k,
+            int(texture.get("playing_card_candidate_top_k", rerank_top_k)),
+            int(jqk_template.get("playing_card_candidate_top_k", rerank_top_k)),
+        )
     if not texture_enabled and not template_enabled:
         return None
 
     short_range = tuple(solver.get("rectangle_short_range_mm", [40.0, 100.0]))
     long_range = tuple(solver.get("rectangle_long_range_mm", [80.0, 130.0]))
+    edge_tolerance_mm = float(solver.get("edge_tolerance_mm", 3.0))
+    edge_relative_tolerance = float(solver.get("edge_relative_tolerance", 0.05))
+    minimum_edge_contact_mm = float(solver.get("minimum_edge_contact_mm", 5.0))
+    minimum_edge_contact_ratio = float(solver.get("minimum_edge_contact_ratio", 0.6))
+    overlap_tolerance_mm = float(solver.get("overlap_tolerance_mm", 4.0))
+    rectangle_area_tolerance = float(solver.get("rectangle_area_tolerance", 0.06))
+    dimension_tolerance_mm = float(solver.get("dimension_tolerance_mm", 3.0))
+    max_search_nodes = int(solver.get("max_search_nodes", 20_000))
+    max_candidates_per_node = int(solver.get("max_candidates_per_node", 128))
+    max_partial_candidates_per_node = int(
+        solver.get("max_partial_candidates_per_node", 32)
+    )
+    max_complete_solutions = int(
+        solver.get("max_complete_solutions", max(rerank_top_k, 12))
+    )
+
+    if is_playing_cards:
+        minimum_edge_contact_ratio = float(
+            solver.get(
+                "playing_card_minimum_edge_contact_ratio",
+                minimum_edge_contact_ratio,
+            )
+        )
+        max_candidates_per_node = int(
+            solver.get(
+                "playing_card_max_candidates_per_node",
+                max_candidates_per_node,
+            )
+        )
+        max_partial_candidates_per_node = int(
+            solver.get(
+                "playing_card_max_partial_candidates_per_node",
+                max_partial_candidates_per_node,
+            )
+        )
+        max_complete_solutions = int(
+            solver.get(
+                "playing_card_max_complete_solutions",
+                max(max_complete_solutions, rerank_top_k),
+            )
+        )
+    anchor_count = int(solver.get("anchor_count", 1))
+    partial_match_penalty = float(solver.get("partial_match_penalty", 0.18))
+    geometry_candidate_min_angle_diff_rad = float(
+        solver.get("geometry_candidate_min_angle_diff_rad", 0.0)
+    )
+    triangle_keep_per_piece = int(solver.get("triangle_keep_per_piece", 0))
+    triangle_min_angle_diff_rad = float(
+        solver.get("triangle_min_angle_diff_rad", 0.0)
+    )
+    triangle_symmetry_edge_tolerance_mm = float(
+        solver.get("triangle_symmetry_edge_tolerance_mm", 0.0)
+    )
+    triangle_symmetry_edge_relative_tolerance = float(
+        solver.get("triangle_symmetry_edge_relative_tolerance", 0.0)
+    )
+    triangle_symmetry_length_bonus_mm = float(
+        solver.get("triangle_symmetry_length_bonus_mm", 0.0)
+    )
+    triangle_flip_side_enabled = bool(
+        solver.get("triangle_flip_side_enabled", False)
+    )
+    triangle_flip_solution_quota = int(
+        solver.get("triangle_flip_solution_quota", 0)
+    )
+    triangle_flip_requires_similar_edge = bool(
+        solver.get("triangle_flip_requires_similar_edge", True)
+    )
+    triangle_flip_max_alignments_per_edge_pair = int(
+        solver.get("triangle_flip_max_alignments_per_edge_pair", 2)
+    )
+    triangle_flip_candidate_quota = int(
+        solver.get("triangle_flip_candidate_quota", 0)
+    )
+    triangle_flip_partial_diagonal_extra_mm = float(
+        solver.get("triangle_flip_partial_diagonal_extra_mm", 0.0)
+    )
+    triangle_flip_partial_area_scale = float(
+        solver.get("triangle_flip_partial_area_scale", 1.0)
+    )
+    triangle_flip_priority_bonus = float(
+        solver.get("triangle_flip_priority_bonus", 0.0)
+    )
+    if is_playing_cards:
+        anchor_count = int(
+            solver.get("playing_card_anchor_count", anchor_count)
+        )
+        partial_match_penalty = float(
+            solver.get(
+                "playing_card_partial_match_penalty",
+                partial_match_penalty,
+            )
+        )
+        geometry_candidate_min_angle_diff_rad = float(
+            solver.get(
+                "playing_card_geometry_candidate_min_angle_diff_rad",
+                geometry_candidate_min_angle_diff_rad,
+            )
+        )
+        triangle_keep_per_piece = int(
+            solver.get("playing_card_triangle_keep_per_piece", triangle_keep_per_piece)
+        )
+        triangle_min_angle_diff_rad = float(
+            solver.get(
+                "playing_card_triangle_min_angle_diff_rad",
+                triangle_min_angle_diff_rad,
+            )
+        )
+        triangle_symmetry_edge_tolerance_mm = float(
+            solver.get(
+                "playing_card_triangle_symmetry_edge_tolerance_mm",
+                triangle_symmetry_edge_tolerance_mm,
+            )
+        )
+        triangle_symmetry_edge_relative_tolerance = float(
+            solver.get(
+                "playing_card_triangle_symmetry_edge_relative_tolerance",
+                triangle_symmetry_edge_relative_tolerance,
+            )
+        )
+        triangle_symmetry_length_bonus_mm = float(
+            solver.get(
+                "playing_card_triangle_symmetry_length_bonus_mm",
+                triangle_symmetry_length_bonus_mm,
+            )
+        )
+        triangle_flip_side_enabled = bool(
+            solver.get(
+                "playing_card_triangle_flip_side_enabled",
+                triangle_flip_side_enabled,
+            )
+        )
+        triangle_flip_solution_quota = int(
+            solver.get(
+                "playing_card_triangle_flip_solution_quota",
+                triangle_flip_solution_quota,
+            )
+        )
+        triangle_flip_requires_similar_edge = bool(
+            solver.get(
+                "playing_card_triangle_flip_requires_similar_edge",
+                triangle_flip_requires_similar_edge,
+            )
+        )
+        triangle_flip_max_alignments_per_edge_pair = int(
+            solver.get(
+                "playing_card_triangle_flip_max_alignments_per_edge_pair",
+                triangle_flip_max_alignments_per_edge_pair,
+            )
+        )
+        triangle_flip_candidate_quota = int(
+            solver.get(
+                "playing_card_triangle_flip_candidate_quota",
+                triangle_flip_candidate_quota,
+            )
+        )
+        triangle_flip_partial_diagonal_extra_mm = float(
+            solver.get(
+                "playing_card_triangle_flip_partial_diagonal_extra_mm",
+                triangle_flip_partial_diagonal_extra_mm,
+            )
+        )
+        triangle_flip_partial_area_scale = float(
+            solver.get(
+                "playing_card_triangle_flip_partial_area_scale",
+                triangle_flip_partial_area_scale,
+            )
+        )
+        triangle_flip_priority_bonus = float(
+            solver.get(
+                "playing_card_triangle_flip_priority_bonus",
+                triangle_flip_priority_bonus,
+            )
+        )
 
     result = solve_with_texture(
         [{"pts": piece.points_mm} for piece in pieces],
@@ -1661,37 +1990,36 @@ def solve_texture_aware_solution(
         lambda_texture=float(texture.get("lambda_texture", 0.5)) if texture_enabled else 0.0,
         top_k=rerank_top_k,
         geometry_kwargs={
-            "edge_tolerance_mm": float(solver.get("edge_tolerance_mm", 3.0)),
-            "edge_relative_tolerance": float(
-                solver.get("edge_relative_tolerance", 0.05)
-            ),
-            "minimum_edge_contact_mm": float(
-                solver.get("minimum_edge_contact_mm", 5.0)
-            ),
-            "minimum_edge_contact_ratio": float(
-                solver.get("minimum_edge_contact_ratio", 0.6)
-            ),
-            "overlap_tolerance_mm": float(solver.get("overlap_tolerance_mm", 4.0)),
-            "rectangle_area_tolerance": float(
-                solver.get("rectangle_area_tolerance", 0.06)
-            ),
+            "edge_tolerance_mm": edge_tolerance_mm,
+            "edge_relative_tolerance": edge_relative_tolerance,
+            "minimum_edge_contact_mm": minimum_edge_contact_mm,
+            "minimum_edge_contact_ratio": minimum_edge_contact_ratio,
+            "overlap_tolerance_mm": overlap_tolerance_mm,
+            "rectangle_area_tolerance": rectangle_area_tolerance,
             "size_range_mm": (
                 (float(short_range[0]), float(short_range[1])),
                 (float(long_range[0]), float(long_range[1])),
             ),
-            "dimension_tolerance_mm": float(
-                solver.get("dimension_tolerance_mm", 3.0)
-            ),
-            "max_search_nodes": int(solver.get("max_search_nodes", 20_000)),
-            "max_candidates_per_node": int(
-                solver.get("max_candidates_per_node", 128)
-            ),
-            "max_partial_candidates_per_node": int(
-                solver.get("max_partial_candidates_per_node", 32)
-            ),
-            "max_complete_solutions": int(
-                solver.get("max_complete_solutions", max(rerank_top_k, 12))
-            ),
+            "dimension_tolerance_mm": dimension_tolerance_mm,
+            "max_search_nodes": max_search_nodes,
+            "max_candidates_per_node": max_candidates_per_node,
+            "max_partial_candidates_per_node": max_partial_candidates_per_node,
+            "max_complete_solutions": max_complete_solutions,
+            "anchor_count": anchor_count,
+            "partial_match_penalty": partial_match_penalty,
+            "triangle_keep_per_piece": triangle_keep_per_piece,
+            "triangle_min_angle_diff_rad": triangle_min_angle_diff_rad,
+            "triangle_symmetry_edge_tolerance_mm": triangle_symmetry_edge_tolerance_mm,
+            "triangle_symmetry_edge_relative_tolerance": triangle_symmetry_edge_relative_tolerance,
+            "triangle_symmetry_length_bonus_mm": triangle_symmetry_length_bonus_mm,
+            "triangle_flip_side_enabled": triangle_flip_side_enabled,
+            "triangle_flip_solution_quota": triangle_flip_solution_quota,
+            "triangle_flip_requires_similar_edge": triangle_flip_requires_similar_edge,
+            "triangle_flip_max_alignments_per_edge_pair": triangle_flip_max_alignments_per_edge_pair,
+            "triangle_flip_candidate_quota": triangle_flip_candidate_quota,
+            "triangle_flip_partial_diagonal_extra_mm": triangle_flip_partial_diagonal_extra_mm,
+            "triangle_flip_partial_area_scale": triangle_flip_partial_area_scale,
+            "triangle_flip_priority_bonus": triangle_flip_priority_bonus,
             "diagnostics": diagnostics,
         },
         gw=float(texture.get("gradient_weight", 0.35)),
@@ -1704,6 +2032,7 @@ def solve_texture_aware_solution(
         fallback_sparse_seam_penalty=float(
             texture.get("fallback_sparse_seam_penalty", 0.08)
         ),
+        geometry_candidate_min_angle_diff_rad=geometry_candidate_min_angle_diff_rad,
         angle_perturb_rad=float(texture.get("candidate_angle_perturb_rad", 0.035)),
         translate_perturb_mm=float(texture.get("candidate_translate_perturb_mm", 1.2)),
     )
@@ -2173,12 +2502,28 @@ def process_frame(frame: np.ndarray, config: Dict, output_dir: Path) -> Tuple[Di
         card_preview = template_visuals.get("card_preview")
         template_preview = template_visuals.get("template_preview")
         mask_comparison = template_visuals.get("mask_comparison")
+        candidate_gallery = template_visuals.get("candidate_gallery")
+        candidate_previews = template_visuals.get("candidate_previews", [])
         if isinstance(card_preview, np.ndarray):
             cv2.imwrite(str(output_dir / "latest_jqk_card_preview.png"), card_preview)
         if isinstance(template_preview, np.ndarray):
             cv2.imwrite(str(output_dir / "latest_jqk_best_template.png"), template_preview)
         if isinstance(mask_comparison, np.ndarray):
             cv2.imwrite(str(output_dir / "latest_jqk_mask_compare.png"), mask_comparison)
+        if isinstance(candidate_gallery, np.ndarray):
+            cv2.imwrite(str(output_dir / "latest_jqk_candidate_gallery.png"), candidate_gallery)
+        if isinstance(candidate_previews, list):
+            for rank, item in enumerate(candidate_previews):
+                if not isinstance(item, dict):
+                    continue
+                image = item.get("image")
+                if not isinstance(image, np.ndarray):
+                    continue
+                candidate_index = int(item.get("candidate_index", rank))
+                cv2.imwrite(
+                    str(output_dir / f"latest_jqk_candidate_{rank:02d}_idx_{candidate_index}.png"),
+                    image,
+                )
     for piece_index, piece in enumerate(pieces):
         if piece.piece_image is not None:
             cv2.imwrite(str(output_dir / f"latest_piece_{piece_index}.png"), piece.piece_image)
