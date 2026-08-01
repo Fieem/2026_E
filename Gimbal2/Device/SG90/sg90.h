@@ -17,7 +17,7 @@
 ***	180° = 2.5ms 脉宽 → CCR = 2500
 **********************************************************/
 
-#define Low_Angle   160
+#define Low_Angle   170
 
 #define High_Angle   12
 
