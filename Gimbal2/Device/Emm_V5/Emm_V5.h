@@ -224,7 +224,7 @@ void Is_Arrived();
 void Move_Pos(int32_t x, int32_t y);
 /* ---- 旋转控制 ---- */
 #define PULSES_PER_REV     6400U   /* 1.8° 步进电机 × 32 细分 = 6400 脉冲/圈 */
-#define ROTATE_VEL         100U     /* 旋转默认速度(RPM)    */
+#define ROTATE_VEL         150U     /* 旋转默认速度(RPM)    */
 #define ROTATE_ACC         10U     /* 旋转默认加速度       */
 
 void Rotate(uint8_t addr, float degrees);

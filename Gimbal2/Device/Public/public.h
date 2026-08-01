@@ -8,8 +8,8 @@
 #include <stdbool.h>
 
 /* ---- 延时宏定义（用户自行调整）---- */
-#define MOTOR_DELAY_MS      6000U   /* 电机移动到位延时(ms) */
-#define SERVO_DELAY_MS      1500U    /* 舵机动作延时(ms)      */
+#define MOTOR_DELAY_MS      3000U   /* 电机移动到位延时(ms) */
+#define SERVO_DELAY_MS      1000U    /* 舵机动作延时(ms)      */
 #define MAGNET_DELAY_MS     1000U    /* 电磁铁稳定延时(ms)    */
 
 /* ---- 脉冲 ↔ 角度换算 ---- */
